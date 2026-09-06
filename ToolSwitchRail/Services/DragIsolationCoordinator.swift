@@ -4,10 +4,10 @@ import ApplicationServices
 /// Keeps expensive background native windows out of the live drag/resize hot path.
 ///
 /// WindowManager still owns canonical geometry and final stack reconciliation. This
-/// coordinator only reacts after it can see that the workspace frame is actually
-/// changing. It temporarily hides already-visible native managed apps (processes stay
-/// alive/warm), places their matching stack windows at the final frame while hidden,
-/// then unhides them after the drag settles.
+/// coordinator only reacts to a drag that starts while the currently selected managed
+/// tool is frontmost. It temporarily hides already-visible native managed apps
+/// (processes stay alive/warm), places their matching stack windows at the final frame
+/// while hidden, then unhides them after the drag settles.
 @MainActor
 final class DragIsolationCoordinator {
     private struct HiddenAppState {
@@ -62,14 +62,19 @@ final class DragIsolationCoordinator {
         case .leftMouseDragged:
             guard !windowManager.isMinimized,
                   let start = dragStartFrame,
-                  let current = windowManager.activeContentFrame else {
+                  let activePID = activePIDAtMouseDown,
+                  activePIDBelongsToSelectedWorkspace(activePID) else {
                 return
             }
 
-            // Text selection and in-app dragging must not hide sibling tools. Only
-            // enter isolation after the managed workspace geometry itself has moved.
-            if !isolationActive && geometryChanged(from: start, to: current) {
-                beginIsolation(stackFrame: start, activePID: activePIDAtMouseDown)
+            // Isolate from the first real drag event instead of waiting until the
+            // canonical frame has already moved by 1pt. The previous one-frame delay
+            // was enough to expose a sliver of the warm stack at the old position.
+            // Background apps are fully covered by the active window, so doing this
+            // for in-app drags/text selection is visually harmless and they are
+            // restored immediately on mouse-up.
+            if !isolationActive {
+                beginIsolation(stackFrame: start, activePID: activePID)
             }
 
         case .leftMouseUp:
@@ -85,11 +90,15 @@ final class DragIsolationCoordinator {
         }
     }
 
-    private func geometryChanged(from old: CGRect, to new: CGRect) -> Bool {
-        abs(old.minX - new.minX) >= 1 ||
-        abs(old.minY - new.minY) >= 1 ||
-        abs(old.width - new.width) >= 1 ||
-        abs(old.height - new.height) >= 1
+    private func activePIDBelongsToSelectedWorkspace(_ pid: pid_t) -> Bool {
+        guard let tool = windowManager.activeTool else { return false }
+
+        switch tool.kind {
+        case .app:
+            return runningApplications(for: tool).contains(where: { $0.processIdentifier == pid })
+        case .web:
+            return browserApplications().contains(where: { $0.processIdentifier == pid })
+        }
     }
 
     private func beginIsolation(stackFrame: CGRect, activePID: pid_t?) {
@@ -189,6 +198,24 @@ final class DragIsolationCoordinator {
             apps.append(contentsOf: workspace.runningApplications.filter { app in
                 guard let name = app.localizedName?.lowercased() else { return false }
                 return candidates.contains(where: { name == $0 || name.contains($0) || $0.contains(name) })
+            })
+        }
+
+        var seen = Set<pid_t>()
+        return apps.filter { seen.insert($0.processIdentifier).inserted }
+    }
+
+    private func browserApplications() -> [NSRunningApplication] {
+        let browser = configStore.configuration.browser
+        var apps: [NSRunningApplication] = []
+
+        if let bundleID = browser.bundleIdentifier, !bundleID.isEmpty {
+            apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
+        }
+
+        if apps.isEmpty {
+            apps.append(contentsOf: NSWorkspace.shared.runningApplications.filter {
+                $0.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
             })
         }
 
