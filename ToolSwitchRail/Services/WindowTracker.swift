@@ -33,6 +33,12 @@ final class WindowTracker {
     private var mouseButtonsDown = false
     private var lastDragCheckTime: TimeInterval = 0
 
+    // Native minimize has a visible system animation. Do not let the workspace react
+    // until that animation has settled, otherwise app.hide()/restore notifications can
+    // make the window appear to bounce back before disappearing.
+    private var minimizePendingUntil: Date = .distantPast
+    private var minimizeConfirmationGeneration: UInt = 0
+
     var isMouseDragging: Bool {
         mouseButtonsDown
     }
@@ -43,6 +49,7 @@ final class WindowTracker {
 
     func markRestoring(duration: TimeInterval = 0.6) {
         restoreUntil = Date().addingTimeInterval(duration)
+        cancelPendingMinimizeConfirmation()
     }
 
     func currentWindowAXPosition() -> CGPoint? {
@@ -59,27 +66,27 @@ final class WindowTracker {
     }
 
     func updateRailWidth(_ width: CGFloat) {
-        self.railWidth = width
+        railWidth = width
     }
 
     func startTracking(app: NSRunningApplication, window: AXUIElement, tool: ToolItem) {
         stopTracking(keepLastFrame: true)
 
-        self.currentApp = app
-        self.currentWindow = window
-        self.currentTool = tool
-        self.isTracking = true
-        self.trackedWindowID = Self.windowID(for: window) ?? 0
+        currentApp = app
+        currentWindow = window
+        currentTool = tool
+        isTracking = true
+        trackedWindowID = Self.windowID(for: window) ?? 0
 
         setupAXObserver(for: app, window: window)
         startPolling()
         startMouseMonitoring()
-
         checkWindowFrame(force: true)
     }
 
     func stopTracking(keepLastFrame: Bool = false) {
         isTracking = false
+        cancelPendingMinimizeConfirmation()
         let appDied = currentApp?.isTerminated ?? false
 
         if let observer = axObserver, let source = observerSource {
@@ -117,10 +124,8 @@ final class WindowTracker {
 
     private func setupAXObserver(for app: NSRunningApplication, window: AXUIElement) {
         var observer: AXObserver?
-        let pid = app.processIdentifier
-
-        let callback: AXObserverCallback = { observer, element, notification, refcon in
-            guard let refcon = refcon else { return }
+        let callback: AXObserverCallback = { _, element, notification, refcon in
+            guard let refcon else { return }
             let tracker = Unmanaged<WindowTracker>.fromOpaque(refcon).takeUnretainedValue()
             if Thread.isMainThread {
                 tracker.handleNotification(element: element, notification: notification)
@@ -131,22 +136,22 @@ final class WindowTracker {
             }
         }
 
-        guard AXObserverCreate(pid, callback, &observer) == .success,
-              let obs = observer else {
+        guard AXObserverCreate(app.processIdentifier, callback, &observer) == .success,
+              let observer else {
             return
         }
 
-        self.axObserver = obs
-        let source = AXObserverGetRunLoopSource(obs)
-        self.observerSource = source
+        axObserver = observer
+        let source = AXObserverGetRunLoopSource(observer)
+        observerSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        _ = AXObserverAddNotification(obs, window, kAXMovedNotification as CFString, selfPtr)
-        _ = AXObserverAddNotification(obs, window, kAXResizedNotification as CFString, selfPtr)
-        _ = AXObserverAddNotification(obs, window, kAXWindowMiniaturizedNotification as CFString, selfPtr)
-        _ = AXObserverAddNotification(obs, window, kAXWindowDeminiaturizedNotification as CFString, selfPtr)
-        _ = AXObserverAddNotification(obs, window, kAXUIElementDestroyedNotification as CFString, selfPtr)
+        _ = AXObserverAddNotification(observer, window, kAXMovedNotification as CFString, selfPtr)
+        _ = AXObserverAddNotification(observer, window, kAXResizedNotification as CFString, selfPtr)
+        _ = AXObserverAddNotification(observer, window, kAXWindowMiniaturizedNotification as CFString, selfPtr)
+        _ = AXObserverAddNotification(observer, window, kAXWindowDeminiaturizedNotification as CFString, selfPtr)
+        _ = AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, selfPtr)
     }
 
     private func startPolling() {
@@ -157,7 +162,7 @@ final class WindowTracker {
             }
         }
         RunLoop.main.add(timer, forMode: .common)
-        self.pollTimer = timer
+        pollTimer = timer
     }
 
     private func startDragPolling() {
@@ -241,10 +246,9 @@ final class WindowTracker {
         if notification == kAXMovedNotification as CFString || notification == kAXResizedNotification as CFString {
             checkWindowFrame(force: true)
         } else if notification == kAXWindowMiniaturizedNotification as CFString {
-            if Date() >= restoreUntil {
-                delegate?.windowTrackerDidMinimizeTarget(self)
-            }
+            scheduleExternalMinimizeConfirmation()
         } else if notification == kAXWindowDeminiaturizedNotification as CFString {
+            cancelPendingMinimizeConfirmation()
             checkWindowFrame(force: true)
             delegate?.windowTrackerDidDeminimizeTarget(self)
         } else if notification == kAXUIElementDestroyedNotification as CFString {
@@ -253,18 +257,50 @@ final class WindowTracker {
         }
     }
 
+    private func cancelPendingMinimizeConfirmation() {
+        minimizeConfirmationGeneration &+= 1
+        minimizePendingUntil = .distantPast
+    }
+
+    private func scheduleExternalMinimizeConfirmation() {
+        guard Date() >= restoreUntil else { return }
+
+        minimizeConfirmationGeneration &+= 1
+        let generation = minimizeConfirmationGeneration
+        minimizePendingUntil = Date().addingTimeInterval(0.18)
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard let self,
+                  self.isTracking,
+                  generation == self.minimizeConfirmationGeneration,
+                  Date() >= self.restoreUntil,
+                  let window = self.currentWindow else {
+                return
+            }
+
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &value)
+            guard result == .success, (value as? Bool) == true else {
+                self.minimizePendingUntil = .distantPast
+                return
+            }
+
+            self.minimizePendingUntil = .distantPast
+            self.delegate?.windowTrackerDidMinimizeTarget(self)
+        }
+    }
+
     func checkWindowFrame(force: Bool = false) {
         if isRailDragging && !force { return }
         guard let window = currentWindow else { return }
 
-        // Avoid checking minimization or hidden status during window restoration/unhide
         if Date() >= restoreUntil {
             if let app = currentApp, app.isHidden {
                 delegate?.windowTrackerDidMinimizeTarget(self)
                 return
             }
 
-            // Avoid checking miniaturization during active mouse dragging
             if !mouseButtonsDown {
                 var minVal: CFTypeRef?
                 let minErr = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minVal)
@@ -272,8 +308,10 @@ final class WindowTracker {
                     delegate?.windowTrackerDidDestroyTarget(self)
                     return
                 }
-                if minErr == .success, let isMin = minVal as? Bool, isMin {
-                    delegate?.windowTrackerDidMinimizeTarget(self)
+                if minErr == .success, let minimized = minVal as? Bool, minimized {
+                    if Date() >= minimizePendingUntil {
+                        scheduleExternalMinimizeConfirmation()
+                    }
                     return
                 }
             }
@@ -301,14 +339,12 @@ final class WindowTracker {
 
             var axPoint = CGPoint.zero
             var axSize = CGSize.zero
-
             if CFGetTypeID(posAX) == AXValueGetTypeID() {
                 AXValueGetValue(posAX as! AXValue, .cgPoint, &axPoint)
             }
             if CFGetTypeID(sizeAX) == AXValueGetTypeID() {
                 AXValueGetValue(sizeAX as! AXValue, .cgSize, &axSize)
             }
-
             guard axSize.width > 50 && axSize.height > 50 else { return }
             liveFrame = convertToNSCoordinates(axPoint: axPoint, axSize: axSize)
         }
@@ -332,7 +368,6 @@ final class WindowTracker {
             width: railWidth,
             height: nsTargetFrame.height
         )
-
         delegate?.windowTracker(self, didUpdateTargetFrame: nsTargetFrame, railFrame: railFrame)
     }
 
@@ -350,6 +385,7 @@ final class WindowTracker {
             trackedWindowID = windowID
         }
         guard windowID > 0 else { return nil }
+
         let options: CGWindowListOption = [.optionIncludingWindow, .excludeDesktopElements]
         guard let info = CGWindowListCopyWindowInfo(options, windowID) as? [[String: Any]],
               let bounds = info.first?[kCGWindowBounds as String] as? NSDictionary,
@@ -359,6 +395,7 @@ final class WindowTracker {
               let h = bounds["Height"] as? NSNumber else {
             return nil
         }
+
         let size = CGSize(width: w.doubleValue, height: h.doubleValue)
         guard size.width > 50 && size.height > 50 else { return nil }
         return convertToNSCoordinates(
@@ -388,7 +425,6 @@ final class WindowTracker {
         let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
             ?? NSScreen.main?.frame.height
             ?? 1080
-
         let nsY = primaryHeight - axPoint.y - axSize.height
         return CGRect(x: axPoint.x, y: nsY, width: axSize.width, height: axSize.height)
     }
