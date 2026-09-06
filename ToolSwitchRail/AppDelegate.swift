@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMonitor: ToolStatusMonitor!
     private var railWindowController: RailWindowController!
     private var hotKeyManager: GlobalHotKeyManager!
+    private var dragIsolationCoordinator: DragIsolationCoordinator!
     private var cancellables = Set<AnyCancellable>()
 
     private var statusItem: NSStatusItem?
@@ -35,6 +36,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         railWindowController.window?.orderFrontRegardless()
 
         windowManager.attachToActiveToolIfAvailable()
+
+        // Keep background native managed apps out of the live drag/resize hot path.
+        // The coordinator only activates after it detects a real workspace geometry change.
+        dragIsolationCoordinator = DragIsolationCoordinator(
+            configStore: configStore,
+            windowManager: windowManager
+        )
 
         NSLog("[ToolSwitchRail] App launched, AXTrusted: %d, railFrame: %@", AccessibilityPermission.isTrusted ? 1 : 0, NSStringFromRect(geometry.rail))
 
