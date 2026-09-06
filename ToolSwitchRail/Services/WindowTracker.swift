@@ -32,6 +32,7 @@ final class WindowTracker {
     private var restoreUntil: Date = .distantPast
     private var mouseButtonsDown = false
     private var lastDragCheckTime: TimeInterval = 0
+    private var trackedWindowFrameChangedDuringMouseInteraction = false
 
     // Native minimize has a visible system animation. Do not let the workspace react
     // until that animation has settled, otherwise app.hide()/restore notifications can
@@ -111,6 +112,7 @@ final class WindowTracker {
         }
         mouseMonitors.removeAll()
         mouseButtonsDown = false
+        trackedWindowFrameChangedDuringMouseInteraction = false
 
         currentWindow = nil
         currentApp = nil
@@ -198,12 +200,14 @@ final class WindowTracker {
                 switch event.type {
                 case .leftMouseDown:
                     self.mouseButtonsDown = true
+                    self.trackedWindowFrameChangedDuringMouseInteraction = false
                     self.startDragPolling()
                     self.lastDragCheckTime = CACurrentMediaTime()
                     self.checkWindowFrame(force: false)
                 case .leftMouseDragged:
                     if !self.mouseButtonsDown {
                         self.mouseButtonsDown = true
+                        self.trackedWindowFrameChangedDuringMouseInteraction = false
                         self.startDragPolling()
                     }
                     let now = CACurrentMediaTime()
@@ -212,10 +216,15 @@ final class WindowTracker {
                         self.checkWindowFrame(force: false)
                     }
                 case .leftMouseUp:
+                    let trackedAppIsFrontmost = self.currentApp?.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    let shouldSettle = self.trackedWindowFrameChangedDuringMouseInteraction && trackedAppIsFrontmost
                     self.mouseButtonsDown = false
                     self.stopDragPolling()
-                    self.checkWindowFrame(force: true)
-                    self.delegate?.windowTrackerDidSettle(self)
+                    if shouldSettle {
+                        self.checkWindowFrame(force: true)
+                        self.delegate?.windowTrackerDidSettle(self)
+                    }
+                    self.trackedWindowFrameChangedDuringMouseInteraction = false
                 default:
                     break
                 }
@@ -357,7 +366,11 @@ final class WindowTracker {
             height: validLiveFrame.size.height.rounded()
         )
 
-        if !force && framesClose(nsTargetFrame, lastTargetFrame) {
+        let frameChanged = !framesClose(nsTargetFrame, lastTargetFrame)
+        if mouseButtonsDown && frameChanged {
+            trackedWindowFrameChangedDuringMouseInteraction = true
+        }
+        if !force && !frameChanged {
             return
         }
         lastTargetFrame = nsTargetFrame
