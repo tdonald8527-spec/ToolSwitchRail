@@ -12,6 +12,7 @@ final class RailWindowController: NSWindowController {
     private let windowManager: WindowManager
     private let statusMonitor: ToolStatusMonitor
     private var priorFrontmostApp: NSRunningApplication?
+    private var visibilityAnimationGeneration: UInt = 0
 
     static let seamExtension: CGFloat = 0
 
@@ -110,6 +111,9 @@ final class RailWindowController: NSWindowController {
 
     func setFloatingForManagedTool(_ isManaged: Bool) {
         guard let window else { return }
+        visibilityAnimationGeneration &+= 1
+        window.alphaValue = 1
+
         if isManaged {
             if window.level != .normal {
                 window.level = .normal
@@ -119,6 +123,9 @@ final class RailWindowController: NSWindowController {
             }
             window.orderFrontRegardless()
         } else {
+            // Switching to an unmanaged app must remain immediate. In particular,
+            // Parallels/Finder/Safari should never wait for a fade before receiving
+            // the full foreground visual state.
             window.orderOut(nil)
         }
     }
@@ -137,17 +144,62 @@ final class RailWindowController: NSWindowController {
     }
 
     func hide() {
-        window?.orderOut(nil)
+        guard let window else { return }
+        visibilityAnimationGeneration &+= 1
+        let generation = visibilityAnimationGeneration
+
+        guard window.isVisible else {
+            window.alphaValue = 1
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.10
+            context.allowsImplicitAnimation = true
+            window.animator().alphaValue = 0
+        } completionHandler: { [weak self, weak window] in
+            Task { @MainActor in
+                guard let self, let window,
+                      generation == self.visibilityAnimationGeneration else { return }
+                window.orderOut(nil)
+                window.alphaValue = 1
+            }
+        }
     }
 
     func show(relativeTo targetWindowID: CGWindowID? = nil) {
         guard let window else { return }
+        visibilityAnimationGeneration &+= 1
+        let generation = visibilityAnimationGeneration
+
+        let wasVisible = window.isVisible
+        if !wasVisible {
+            window.alphaValue = 0
+        }
+
         if window.level == .floating {
             window.orderFrontRegardless()
         } else if let wid = targetWindowID, wid > 0 {
             window.order(.above, relativeTo: Int(wid))
         } else if !window.isVisible {
             window.orderFrontRegardless()
+        }
+
+        guard !wasVisible || window.alphaValue < 0.999 else {
+            window.alphaValue = 1
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.allowsImplicitAnimation = true
+            window.animator().alphaValue = 1
+        } completionHandler: { [weak self, weak window] in
+            Task { @MainActor in
+                guard let self, let window,
+                      generation == self.visibilityAnimationGeneration else { return }
+                window.alphaValue = 1
+            }
         }
     }
 
