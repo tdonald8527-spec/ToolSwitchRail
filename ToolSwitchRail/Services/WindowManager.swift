@@ -46,15 +46,27 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         get { canonicalStackFrame }
         set { canonicalStackFrame = newValue }
     }
+
     private var dragStartRailOrigin: CGPoint?
     private var dragStartAXPoint: CGPoint?
+    private var dragStartContentFrame: CGRect?
     private var pendingActivationTask: Task<Void, Never>?
     private var pendingHideTask: Task<Void, Never>?
+    private var minimumVerificationTask: Task<Void, Never>?
     private var isSwitchingTool = false
     private var ignoreActivationUntil = Date.distantPast
     private var workspaceScanTimer: Timer?
-    private var revealHiddenOnStack = false
     private var cachedChromeURLs: (timestamp: Date, map: [String: String])?
+
+    // Learned at runtime when a managed window refuses a requested smaller size.
+    // This lets the whole stack converge on the strictest minimum among the tools
+    // that are actually in use instead of relying only on one hard-coded app size.
+    private var learnedMinimumSizes: [String: CGSize] = [:]
+
+    // Live stack synchronization is intentionally throttled. Position-only moves are
+    // cheap, while resize calls can cause Electron/Web render work in every sibling.
+    private var lastLiveStackSyncTime: TimeInterval = 0
+    private var lastLiveStackFrame: CGRect?
 
     private func activateApp(_ app: NSRunningApplication) {
         if app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier {
@@ -66,7 +78,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             app.activate(options: .activateIgnoringOtherApps)
         }
     }
-
 
     func orderAdjacentToTargetWindow(targetWindowID: CGWindowID? = nil) {
         let wid = targetWindowID ?? currentTargetWindowID
@@ -206,8 +217,26 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     var compatibilityMinSize: CGSize {
         let cfgW = CGFloat(configStore.configuration.workspace.minimumWidth)
         let cfgH = CGFloat(configStore.configuration.workspace.minimumHeight)
-        // WPS 灵犀 requires 960x680, which is the global compatibility minimum
-        return CGSize(width: max(960.0, cfgW), height: max(680.0, cfgH))
+
+        var width = cfgW
+        var height = cfgH
+
+        // Keep the known WPS floor only when WPS is actually enabled.
+        if configStore.configuration.tools.contains(where: {
+            $0.enabled && ["wps-lingxi", "wpslingxi", "lingxi"].contains($0.id.lowercased())
+        }) {
+            width = max(width, 960.0)
+            height = max(height, 680.0)
+        }
+
+        // Add runtime-learned minimums from every managed tool that resisted a
+        // requested resize. The canonical stack can never shrink below the max.
+        for size in learnedMinimumSizes.values {
+            width = max(width, size.width)
+            height = max(height, size.height)
+        }
+
+        return CGSize(width: width, height: height)
     }
 
     func clampToCanonicalConstraints(_ frame: CGRect) -> CGRect {
@@ -279,10 +308,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return
         }
 
-        // 2. Try any running registered tool with a visible unminimized window
+        // 2. Try any running registered tool with a visible unminimized window.
+        // Never wake hidden/minimized sibling tools just to rebuild the stack.
         for tool in configStore.configuration.tools where tool.enabled {
             let apps = runningApplications(for: tool)
             for app in apps {
+                if app.isHidden && !isBrowserApplication(app) { continue }
                 let windows = standardWindows(for: app, tool: tool)
                 if let window = windows.first(where: { !boolAttribute($0, kAXMinimizedAttribute as CFString) }) {
                     if attachToWindow(window, app: app, tool: tool) {
@@ -311,7 +342,11 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         if isMinimized {
             if let tool = registeredTool(for: app) {
+                // Dock activation restores only the requested tool. Background siblings
+                // remain hidden/minimized until explicitly selected.
+                isMinimized = false
                 ignoreActivationUntil = Date().addingTimeInterval(0.8)
+                railWindowController?.show()
                 switchTo(tool)
                 return
             }
@@ -376,7 +411,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 let startTime = Date()
                 let timeout: TimeInterval = 8.0
                 while Date().timeIntervalSince(startTime) < timeout {
-                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    try? await Task.sleep(nanoseconds: 80_000_000)
                     if Task.isCancelled { return }
 
                     // If user switched to another app, stop waiting
@@ -590,13 +625,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         if wasHidden || wasMinimized {
             windowTracker.markRestoring(duration: 1.2)
         }
-        if wasHidden {
-            setAppHidden(app, false)
-            app.unhide()
-        }
-        if wasMinimized {
-            setMinimized(window, false)
-        }
 
         selectedToolID = tool.id
         isMinimized = false
@@ -606,11 +634,22 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         let currentActual = windowFrame(window)
         let slot = workspaceSlot(preferred: canonicalStackFrame, fallback: currentActual)
         let effectiveFrame = clampToCanonicalConstraints(slot)
-        let needsSetFrame = currentActual == nil || !framesAlmostEqual(currentActual!, effectiveFrame)
 
-        if needsSetFrame {
-            setFrame(window, nsFrame: effectiveFrame)
+        // Place first, reveal second. This prevents a newly launched/hidden app from
+        // appearing at its own default macOS location and then visibly jumping.
+        setFrame(window, nsFrame: effectiveFrame)
+
+        if wasHidden {
+            setAppHidden(app, false)
+            app.unhide()
         }
+        if wasMinimized {
+            setMinimized(window, false)
+        }
+
+        // Re-assert after reveal because some Electron apps restore their saved frame
+        // during deminiaturization/unhide.
+        setFrame(window, nsFrame: effectiveFrame)
 
         canonicalStackFrame = effectiveFrame
         windowTracker.startTracking(app: app, window: window, tool: tool)
@@ -629,12 +668,11 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         orderAdjacentToTargetWindow(targetWindowID: targetWid)
         stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: window)
 
-        if wasMinimized {
-            Task {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                if needsSetFrame {
-                    self.setFrame(window, nsFrame: effectiveFrame)
-                }
+        if wasMinimized || wasHidden {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard let self else { return }
+                self.setFrame(window, nsFrame: effectiveFrame)
                 self.bringWindowToFront(window, app: app, forceActivate: false)
                 self.windowTracker.checkWindowFrame(force: true)
                 self.orderAdjacentToTargetWindow(targetWindowID: targetWid)
@@ -685,7 +723,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         if isMinimized {
             isMinimized = false
-            revealHiddenOnStack = true
             railWindowController?.show()
         }
         lastError = nil
@@ -706,7 +743,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return
         }
 
-        // 2. SLOW PATH: Tool not running yet -> Launch asynchronously
+        // 2. SLOW PATH: Tool not running yet -> launch without foreground activation,
+        // place the first matching window, then activate only the requested tool.
         isSwitchingTool = true
         launchingToolID = tool.id
 
@@ -743,39 +781,47 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         ignoreActivationUntil = Date().addingTimeInterval(2.0)
         pendingActivationTask?.cancel()
         pendingActivationTask = nil
+        minimumVerificationTask?.cancel()
         windowTracker.markRestoring(duration: 2.0)
         railWindowController?.hide()
         windowTracker.stopTracking(keepLastFrame: true)
 
         let selfPID = ProcessInfo.processInfo.processIdentifier
-        var hiddenPIDs = Set<pid_t>()
+        var nativeAppsByPID: [pid_t: NSRunningApplication] = [:]
+        var browserWindows: [AXUIElement] = []
 
+        // Collect first, then perform the visibility changes. Native apps are hidden
+        // as whole processes instead of being animated window-by-window into the Dock.
         for tool in configStore.configuration.tools where tool.enabled {
-            let apps = runningApplications(for: tool)
-            for app in apps {
+            for app in runningApplications(for: tool) {
                 let pid = app.processIdentifier
                 if pid == selfPID { continue }
 
                 let appName = (app.localizedName ?? "").lowercased()
                 let bundleID = (app.bundleIdentifier ?? "").lowercased()
-                if appName.contains("rustdesk") || bundleID.contains("rustdesk") {
-                    continue
-                }
+                if appName.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
 
                 if isBrowserApplication(app) {
                     for win in standardWindows(for: app, tool: tool) {
-                        setMinimized(win, true)
+                        if browserWindows.contains(where: { CFEqual($0, win) }) { continue }
+                        if boolAttribute(win, kAXMinimizedAttribute as CFString) { continue }
+                        browserWindows.append(win)
                     }
-                    continue
+                } else {
+                    nativeAppsByPID[pid] = app
                 }
-
-                if hiddenPIDs.contains(pid) { continue }
-                hiddenPIDs.insert(pid)
-                for win in standardWindows(for: app, tool: tool) {
-                    setMinimized(win, true)
-                }
-                setAppHidden(app, true)
             }
+        }
+
+        // Hide native tools first: no per-window minimize animation.
+        for app in nativeAppsByPID.values {
+            setAppHidden(app, true)
+        }
+
+        // Chrome may also contain unrelated windows, so we must not hide the whole
+        // browser process. Only the registered web-app windows are minimized.
+        for win in browserWindows {
+            setMinimized(win, true)
         }
     }
 
@@ -812,7 +858,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return
         }
         isMinimized = false
-        revealHiddenOnStack = true
         ignoreActivationUntil = Date().addingTimeInterval(1.5)
         windowTracker.markRestoring(duration: 1.5)
         railWindowController?.show()
@@ -821,6 +866,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             ?? selectedToolID.flatMap { id in configStore.configuration.tools.first(where: { $0.id == id }) }
             ?? configStore.configuration.tools.first(where: { $0.enabled })
         guard let tool else { return }
+        // Restore only the selected tool. Siblings stay hidden/minimized.
         switchTo(tool)
     }
 
@@ -856,7 +902,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             setFrame(target, nsFrame: restoreContent)
             activeContentFrame = restoreContent
             if let tool = windowTracker.currentTool {
-                alignSameAppRegisteredWindows(to: restoreContent, activeTool: tool, activeWindow: target)
+                stackRegisteredWindows(onto: restoreContent, activeTool: tool, activeWindow: target, verify: true)
             }
             railWindowController?.move(to: restoreRail)
             windowTracker.checkWindowFrame(force: true)
@@ -881,7 +927,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             activeContentFrame = unifiedContentFrame
             setFrame(target, nsFrame: unifiedContentFrame)
             if let tool = windowTracker.currentTool {
-                alignSameAppRegisteredWindows(to: unifiedContentFrame, activeTool: tool, activeWindow: target)
+                stackRegisteredWindows(onto: unifiedContentFrame, activeTool: tool, activeWindow: target, verify: true)
             }
             railWindowController?.move(to: unifiedRailFrame)
             windowTracker.checkWindowFrame(force: true)
@@ -892,6 +938,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
     func beginRailResize() {
         windowTracker.isRailDragging = true
+        lastLiveStackSyncTime = 0
+        lastLiveStackFrame = nil
         if isMaximized {
             isMaximized = false
         }
@@ -954,6 +1002,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         if let target = windowTracker.currentWindow {
             setFrame(target, nsFrame: newTargetFrame)
             activeContentFrame = newTargetFrame
+            if let tool = windowTracker.currentTool {
+                liveSyncBackgroundWindows(to: newTargetFrame, activeTool: tool, activeWindow: target)
+            }
         }
     }
 
@@ -961,9 +1012,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         windowTracker.isRailDragging = false
         windowTracker.checkWindowFrame(force: true)
         orderAdjacentToTargetWindow()
-        if let targetFrame = activeContentFrame, let tool = windowTracker.currentTool {
-            alignSameAppRegisteredWindows(to: targetFrame, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        if let targetFrame = activeContentFrame,
+           let tool = windowTracker.currentTool,
+           let target = windowTracker.currentWindow {
+            stackRegisteredWindows(onto: targetFrame, activeTool: tool, activeWindow: target, verify: true)
         }
+        lastLiveStackFrame = nil
     }
 
     func resizeToPreset(width: CGFloat, height: CGFloat) {
@@ -1007,8 +1061,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         isMaximized = false
         railWindowController?.move(to: geo.rail)
         activeContentFrame = geo.content
-        if let tool = windowTracker.currentTool {
-            alignSameAppRegisteredWindows(to: geo.content, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        if let tool = windowTracker.currentTool, let target = windowTracker.currentWindow {
+            stackRegisteredWindows(onto: geo.content, activeTool: tool, activeWindow: target, verify: true)
         }
         windowTracker.checkWindowFrame(force: true)
     }
@@ -1021,7 +1075,10 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         if dragStartRailOrigin == nil {
             dragStartRailOrigin = railWindow.frame.origin
             dragStartAXPoint = windowTracker.currentWindowAXPosition()
+            dragStartContentFrame = canonicalStackFrame ?? activeContentFrame ?? windowTracker.currentWindow.flatMap(windowFrame)
             windowTracker.isRailDragging = true
+            lastLiveStackSyncTime = 0
+            lastLiveStackFrame = nil
         }
 
         guard let startRail = dragStartRailOrigin else { return }
@@ -1043,6 +1100,13 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             if let pointVal = AXValueCreate(.cgPoint, &newAXPoint) {
                 AXUIElementSetAttributeValue(target, kAXPositionAttribute as CFString, pointVal)
             }
+
+            if let startContent = dragStartContentFrame,
+               let tool = windowTracker.currentTool {
+                let newContentFrame = startContent.offsetBy(dx: translation.width, dy: -translation.height)
+                canonicalStackFrame = newContentFrame
+                liveSyncBackgroundWindows(to: newContentFrame, activeTool: tool, activeWindow: target)
+            }
         }
     }
 
@@ -1050,12 +1114,16 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         windowTracker.isRailDragging = false
         dragStartRailOrigin = nil
         dragStartAXPoint = nil
+        dragStartContentFrame = nil
 
         windowTracker.checkWindowFrame(force: true)
         orderAdjacentToTargetWindow()
-        if let targetFrame = activeContentFrame, let tool = windowTracker.currentTool {
-            alignSameAppRegisteredWindows(to: targetFrame, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        if let targetFrame = activeContentFrame,
+           let tool = windowTracker.currentTool,
+           let target = windowTracker.currentWindow {
+            stackRegisteredWindows(onto: targetFrame, activeTool: tool, activeWindow: target, verify: true)
         }
+        lastLiveStackFrame = nil
     }
 
     func workspaceGeometry() -> (rail: CGRect, content: CGRect) {
@@ -1094,7 +1162,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             if let bundleID = resolvedBundleIdentifier(for: tool),
                let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 let config = NSWorkspace.OpenConfiguration()
-                config.activates = true
+                // Do not foreground a new app until its first real window is placed in
+                // canonicalStackFrame. focus(...) activates it after placement.
+                config.activates = false
                 NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
                     if let error {
                         print("[WindowManager] Open app failed: \(error)")
@@ -1104,7 +1174,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             }
 
             if let appName = tool.appName, !appName.isEmpty {
-                try runOpen(arguments: ["-a", appName])
+                // -g opens without bringing the application to the foreground.
+                try runOpen(arguments: ["-g", "-a", appName])
                 return
             }
 
@@ -1143,7 +1214,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return
         }
 
-        try runOpen(arguments: ["-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
+        try runOpen(arguments: ["-g", "-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
     }
 
     private func runOpen(arguments: [String]) throws {
@@ -1159,7 +1230,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             if let match = findWindow(for: tool) {
                 return match
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            // Poll quickly only during launch so the first frame can be placed before
+            // the user sees a default-position flash.
+            try? await Task.sleep(nanoseconds: 60_000_000)
         }
         return nil
     }
@@ -1399,13 +1472,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         if wasHidden || wasMinimized {
             windowTracker.markRestoring(duration: 1.2)
         }
-        if wasHidden {
-            setAppHidden(match.app, false)
-            match.app.unhide()
-        }
-        if wasMinimized {
-            setMinimized(match.window, false)
-        }
 
         let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
         let currentActual = windowFrame(match.window)
@@ -1414,10 +1480,18 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         isMinimized = false
 
-        let needsSetFrame = currentActual == nil || !framesAlmostEqual(currentActual!, effectiveFrame)
-        if needsSetFrame {
-            setFrame(match.window, nsFrame: effectiveFrame)
+        // Place while hidden/minimized first so the requested tool does not flash at
+        // its saved/default position before joining the workspace.
+        setFrame(match.window, nsFrame: effectiveFrame)
+
+        if wasHidden {
+            setAppHidden(match.app, false)
+            match.app.unhide()
         }
+        if wasMinimized {
+            setMinimized(match.window, false)
+        }
+        setFrame(match.window, nsFrame: effectiveFrame)
 
         let railFrame = CGRect(
             x: effectiveFrame.minX - railWidth,
@@ -1438,11 +1512,10 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: match.window)
 
         if wasMinimized || wasHidden {
-            Task {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                if needsSetFrame {
-                    self.setFrame(match.window, nsFrame: effectiveFrame)
-                }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard let self else { return }
+                self.setFrame(match.window, nsFrame: effectiveFrame)
                 self.bringWindowToFront(match.window, app: match.app, forceActivate: false)
                 self.windowTracker.checkWindowFrame(force: true)
                 self.orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
@@ -1486,6 +1559,59 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         }
     }
 
+    // Move/resize background members while the foreground frame is changing. This is
+    // deliberately separate from stackRegisteredWindows: it never reveals siblings and
+    // never raises/focuses them, so live movement does not create a visible cascade.
+    private func liveSyncBackgroundWindows(
+        to frame: CGRect,
+        activeTool: ToolItem,
+        activeWindow: AXUIElement?,
+        force: Bool = false
+    ) {
+        guard !isMinimized else { return }
+        guard frame.width > 80, frame.height > 80 else { return }
+
+        let now = Date().timeIntervalSinceReferenceDate
+        let sizeChanged: Bool
+        if let previous = lastLiveStackFrame {
+            sizeChanged = abs(previous.width - frame.width) >= 1 || abs(previous.height - frame.height) >= 1
+        } else {
+            sizeChanged = true
+        }
+        let minimumInterval: TimeInterval = sizeChanged ? (1.0 / 24.0) : (1.0 / 60.0)
+        if !force && now - lastLiveStackSyncTime < minimumInterval { return }
+        lastLiveStackSyncTime = now
+        lastLiveStackFrame = frame
+
+        let stacked = CGRect(
+            x: frame.minX.rounded(),
+            y: frame.minY.rounded(),
+            width: frame.width.rounded(),
+            height: frame.height.rounded()
+        )
+        let tracked = activeWindow ?? windowTracker.currentWindow
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        var seenWindows: [AXUIElement] = []
+
+        for tool in configStore.configuration.tools where tool.enabled {
+            for app in runningApplications(for: tool) {
+                if app.processIdentifier == selfPID { continue }
+                let appName = (app.localizedName ?? "").lowercased()
+                let bundleID = (app.bundleIdentifier ?? "").lowercased()
+                if appName.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
+                if app.isHidden && !isBrowserApplication(app) { continue }
+
+                for win in standardWindows(for: app, tool: tool) {
+                    if let tracked, CFEqual(win, tracked) { continue }
+                    if seenWindows.contains(where: { CFEqual($0, win) }) { continue }
+                    seenWindows.append(win)
+                    if boolAttribute(win, kAXMinimizedAttribute as CFString) { continue }
+                    setFrame(win, nsFrame: stacked)
+                }
+            }
+        }
+    }
+
     private func stackRegisteredWindows(onto frame: CGRect, activeTool: ToolItem, activeWindow: AXUIElement?, verify: Bool = false) {
         guard !isMinimized else { return }
         guard frame.width > 80, frame.height > 80 else { return }
@@ -1500,10 +1626,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         let selfPID = ProcessInfo.processInfo.processIdentifier
         var didMoveAnyWindow = false
         var seenWindows: [AXUIElement] = []
-        var movedWindows: [AXUIElement] = []
-
-        let revealHidden = revealHiddenOnStack
-        revealHiddenOnStack = false
+        var verificationTargets: [(tool: ToolItem, window: AXUIElement)] = []
 
         for tool in configStore.configuration.tools where tool.enabled {
             let apps = runningApplications(for: tool)
@@ -1516,48 +1639,126 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                     continue
                 }
 
-                if app.isHidden && !isBrowserApplication(app) {
-                    if !revealHidden { continue }
-                    setAppHidden(app, false)
-                }
+                // Warm stack alignment must never wake a hidden/minimized sibling.
+                // Only the selected tool may be restored by focus/attach.
+                if app.isHidden && !isBrowserApplication(app) { continue }
                 let windows = standardWindows(for: app, tool: tool)
 
                 for win in windows {
-                    if let tracked, CFEqual(win, tracked) { continue }
                     if seenWindows.contains(where: { CFEqual($0, win) }) { continue }
                     seenWindows.append(win)
 
-                    if boolAttribute(win, kAXMinimizedAttribute as CFString) {
-                        if !revealHidden { continue }
-                        setMinimized(win, false)
+                    if boolAttribute(win, kAXMinimizedAttribute as CFString) { continue }
+                    if verify {
+                        verificationTargets.append((tool: tool, window: win))
                     }
+                    if let tracked, CFEqual(win, tracked) { continue }
                     if let current = windowFrame(win), framesAlmostEqual(current, stacked) {
                         continue
                     }
                     setFrame(win, nsFrame: stacked)
-                    if let actual = windowFrame(win) {
-                        let widthDelta = stacked.width - actual.width
-                        let heightDelta = stacked.height - actual.height
-                        if widthDelta > 0.5 || heightDelta > 0.5 {
-                            let adjusted = CGRect(
-                                x: stacked.minX + widthDelta,
-                                y: stacked.minY + heightDelta,
-                                width: actual.width,
-                                height: actual.height
-                            )
-                            setFrame(win, nsFrame: adjusted)
-                        }
-                    }
                     didMoveAnyWindow = true
-                    movedWindows.append(win)
                 }
             }
+        }
+
+        if verify,
+           let tracked,
+           !verificationTargets.contains(where: { CFEqual($0.window, tracked) }) {
+            verificationTargets.append((tool: activeTool, window: tracked))
         }
 
         if didMoveAnyWindow, let tracked {
             AXUIElementPerformAction(tracked, kAXRaiseAction as CFString)
             AXUIElementSetAttributeValue(tracked, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementSetAttributeValue(tracked, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+
+        if verify {
+            scheduleMinimumVerification(
+                requestedFrame: stacked,
+                targets: verificationTargets,
+                activeTool: activeTool,
+                activeWindow: tracked
+            )
+        }
+    }
+
+    private func scheduleMinimumVerification(
+        requestedFrame: CGRect,
+        targets: [(tool: ToolItem, window: AXUIElement)],
+        activeTool: ToolItem,
+        activeWindow: AXUIElement?
+    ) {
+        minimumVerificationTask?.cancel()
+        minimumVerificationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let self, !Task.isCancelled else { return }
+
+            var learnedSomething = false
+            for target in targets {
+                guard let actual = self.windowFrame(target.window) else { continue }
+                var learned = self.learnedMinimumSizes[target.tool.id] ?? .zero
+                var changed = false
+
+                if actual.width > requestedFrame.width + 1.5 {
+                    let newWidth = max(learned.width, actual.width.rounded(.up))
+                    if newWidth > learned.width + 0.5 {
+                        learned.width = newWidth
+                        changed = true
+                    }
+                }
+                if actual.height > requestedFrame.height + 1.5 {
+                    let newHeight = max(learned.height, actual.height.rounded(.up))
+                    if newHeight > learned.height + 0.5 {
+                        learned.height = newHeight
+                        changed = true
+                    }
+                }
+
+                if changed {
+                    self.learnedMinimumSizes[target.tool.id] = learned
+                    learnedSomething = true
+                    NSLog(
+                        "[ToolSwitchRail] Learned minimum for %@: %.0f x %.0f",
+                        target.tool.name,
+                        learned.width,
+                        learned.height
+                    )
+                }
+            }
+
+            if learnedSomething {
+                self.reconcileCanonicalFrameToLearnedMinimum(activeTool: activeTool, activeWindow: activeWindow)
+            }
+        }
+    }
+
+    private func reconcileCanonicalFrameToLearnedMinimum(activeTool: ToolItem, activeWindow: AXUIElement?) {
+        guard var frame = canonicalStackFrame else { return }
+        let minimum = compatibilityMinSize
+        guard frame.width + 0.5 < minimum.width || frame.height + 0.5 < minimum.height else { return }
+
+        frame.size.width = max(frame.width, minimum.width)
+        frame.size.height = max(frame.height, minimum.height)
+        let expanded = clampToCanonicalConstraints(frame)
+        canonicalStackFrame = expanded
+
+        if let activeWindow {
+            setFrame(activeWindow, nsFrame: expanded)
+        }
+
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        railWindowController?.move(to: CGRect(
+            x: expanded.minX - railWidth,
+            y: expanded.minY,
+            width: railWidth,
+            height: expanded.height
+        ))
+
+        stackRegisteredWindows(onto: expanded, activeTool: activeTool, activeWindow: activeWindow, verify: false)
+        if let activeWindow {
+            AXUIElementPerformAction(activeWindow, kAXRaiseAction as CFString)
         }
     }
 
@@ -1772,7 +1973,14 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             canonicalStackFrame = targetFrame
             railWindowController?.move(to: railFrame)
         }
-        // Do not restack other tools during live drag — that flashes every sibling window.
+
+        // Keep every already-visible sibling under the foreground window while the
+        // user moves/resizes the active app. This removes the old-position "ghost".
+        if tracker.isMouseDragging,
+           let tool = tracker.currentTool,
+           let target = tracker.currentWindow {
+            liveSyncBackgroundWindows(to: targetFrame, activeTool: tool, activeWindow: target)
+        }
     }
 
     func windowTrackerDidMinimizeTarget(_ tracker: WindowTracker) {
@@ -1815,7 +2023,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         )
         railWindowController?.move(to: adjustedRailFrame)
 
-        // P0: Always synchronize all background managed windows to canonicalStackFrame on mouseUp!
+        // Final exact synchronization + runtime minimum-size verification.
         if let tool = tracker.currentTool {
             stackRegisteredWindows(onto: clampedFrame, activeTool: tool, activeWindow: targetWindow, verify: true)
         }
@@ -1825,6 +2033,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
         railWindowController?.setFloatingForManagedTool(true)
         orderAdjacentToTargetWindow()
+        lastLiveStackFrame = nil
     }
 
     func windowTrackerDidDeminimizeTarget(_ tracker: WindowTracker) {
