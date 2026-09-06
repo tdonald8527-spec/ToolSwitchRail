@@ -1,0 +1,1860 @@
+import AppKit
+import ApplicationServices
+import SwiftUI
+
+@MainActor
+final class WindowManager: ObservableObject, WindowTrackerDelegate {
+    @Published private(set) var selectedToolID: String?
+    @Published private(set) var isMinimized: Bool = false
+    @Published var lastError: String?
+    @Published private(set) var launchingToolID: String?
+    @Published private(set) var openToolIDs: Set<String> = []
+
+    var activeTool: ToolItem? {
+        guard let id = selectedToolID else { return nil }
+        return configStore.configuration.tools.first(where: { $0.id == id })
+    }
+
+    private static let _axGetWindowFunc: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError)? = {
+        guard let handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY),
+              let sym = dlsym(handle, "_AXUIElementGetWindow") else {
+            return nil
+        }
+        return unsafeBitCast(sym, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self)
+    }()
+
+    static func windowID(for element: AXUIElement) -> CGWindowID? {
+        guard let fn = _axGetWindowFunc else { return nil }
+        var wid: CGWindowID = 0
+        if fn(element, &wid) == .success, wid > 0 {
+            return wid
+        }
+        return nil
+    }
+
+    var currentTargetWindowID: CGWindowID? {
+        guard let win = windowTracker.currentWindow else { return nil }
+        return Self.windowID(for: win)
+    }
+
+    private let configStore: ConfigStore
+    private let windowTracker: WindowTracker
+    weak var railWindowController: RailWindowController?
+
+    private(set) var canonicalStackFrame: CGRect?
+    var activeContentFrame: CGRect? {
+        get { canonicalStackFrame }
+        set { canonicalStackFrame = newValue }
+    }
+    private var dragStartRailOrigin: CGPoint?
+    private var dragStartAXPoint: CGPoint?
+    private var pendingActivationTask: Task<Void, Never>?
+    private var pendingHideTask: Task<Void, Never>?
+    private var isSwitchingTool = false
+    private var ignoreActivationUntil = Date.distantPast
+    private var workspaceScanTimer: Timer?
+    private var revealHiddenOnStack = false
+    private var cachedChromeURLs: (timestamp: Date, map: [String: String])?
+
+    private func activateApp(_ app: NSRunningApplication) {
+        if app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            return
+        }
+        if #available(macOS 14.0, *) {
+            app.activate()
+        } else {
+            app.activate(options: .activateIgnoringOtherApps)
+        }
+    }
+
+
+    func orderAdjacentToTargetWindow(targetWindowID: CGWindowID? = nil) {
+        let wid = targetWindowID ?? currentTargetWindowID
+        railWindowController?.orderAdjacentToTargetWindow(targetWindowID: wid)
+    }
+
+    func prepareForKeyInteraction() {
+        railWindowController?.prepareForKeyInteraction()
+    }
+
+    func restorePriorFrontmostApp() {
+        railWindowController?.restorePriorFrontmostApp()
+    }
+
+    func showSettingsMenu(from point: NSPoint? = nil) {
+        prepareForKeyInteraction()
+
+        let menu = NSMenu()
+
+        let minItem = NSMenuItem(title: "最小化 (Cmd+Option+M)", action: #selector(menuActionMinimize), keyEquivalent: "m")
+        minItem.keyEquivalentModifierMask = [.command, .option]
+        minItem.target = self
+        menu.addItem(minItem)
+
+        let zoomItem = NSMenuItem(title: "最大化 / 还原", action: #selector(menuActionToggleMaximize), keyEquivalent: "")
+        zoomItem.target = self
+        menu.addItem(zoomItem)
+
+        let presetMenu = NSMenu()
+        let p1 = NSMenuItem(title: "紧凑 (960 × 680)", action: #selector(menuActionPreset1), keyEquivalent: "")
+        p1.target = self
+        presetMenu.addItem(p1)
+        let p2 = NSMenuItem(title: "标准 (1100 × 750)", action: #selector(menuActionPreset2), keyEquivalent: "")
+        p2.target = self
+        presetMenu.addItem(p2)
+        let p3 = NSMenuItem(title: "大屏 (1400 × 900)", action: #selector(menuActionPreset3), keyEquivalent: "")
+        p3.target = self
+        presetMenu.addItem(p3)
+        presetMenu.addItem(NSMenuItem.separator())
+        let pReset = NSMenuItem(title: "重置为居中默认尺寸", action: #selector(menuActionResetDefault), keyEquivalent: "")
+        pReset.target = self
+        presetMenu.addItem(pReset)
+
+        let presetItem = NSMenuItem(title: "窗口预设尺寸", action: nil, keyEquivalent: "")
+        presetItem.submenu = presetMenu
+        menu.addItem(presetItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let openCfg = NSMenuItem(title: "打开配置文件", action: #selector(menuActionOpenConfig), keyEquivalent: "")
+        openCfg.target = self
+        menu.addItem(openCfg)
+
+        let revealCfg = NSMenuItem(title: "在 Finder 中显示", action: #selector(menuActionRevealConfig), keyEquivalent: "")
+        revealCfg.target = self
+        menu.addItem(revealCfg)
+
+        let reloadCfg = NSMenuItem(title: "重新载入配置", action: #selector(menuActionReloadConfig), keyEquivalent: "")
+        reloadCfg.target = self
+        menu.addItem(reloadCfg)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let axStatusTitle = AccessibilityPermission.isTrusted ? "辅助功能权限：已开启 (正常)" : "⚠️ 辅助功能权限：未开启 (点击修复)"
+        let axItem = NSMenuItem(title: axStatusTitle, action: #selector(menuActionCheckAX), keyEquivalent: "")
+        axItem.target = self
+        menu.addItem(axItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "退出 Tool Switch Rail", action: #selector(menuActionQuit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        let popLocation = point ?? NSEvent.mouseLocation
+        menu.popUp(positioning: nil, at: popLocation, in: nil)
+
+        restorePriorFrontmostApp()
+    }
+
+    @objc private func menuActionMinimize() { minimizeCurrent() }
+    @objc private func menuActionToggleMaximize() { toggleMaximize() }
+    @objc private func menuActionPreset1() { resizeToPreset(width: 1016, height: 680) }
+    @objc private func menuActionPreset2() { resizeToPreset(width: 1156, height: 750) }
+    @objc private func menuActionPreset3() { resizeToPreset(width: 1456, height: 900) }
+    @objc private func menuActionResetDefault() { resetToDefaultGeometry() }
+    @objc private func menuActionOpenConfig() { configStore.openConfigFile() }
+    @objc private func menuActionRevealConfig() { configStore.revealConfigFile() }
+    @objc private func menuActionReloadConfig() { configStore.reload() }
+    @objc private func menuActionCheckAX() {
+        AccessibilityPermission.promptIfNeeded()
+        if !AccessibilityPermission.isTrusted {
+            AccessibilityPermission.showPermissionAlert()
+        }
+    }
+    @objc private func menuActionQuit() { NSApp.terminate(nil) }
+
+    init(configStore: ConfigStore) {
+        self.configStore = configStore
+        self.windowTracker = WindowTracker(railWidth: CGFloat(configStore.configuration.workspace.railWidth))
+        self.windowTracker.delegate = self
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppActivation(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppLaunch(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppTermination(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleSpaceChange(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+
+        let scan = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.scanForExternalMinimize()
+            }
+        }
+        RunLoop.main.add(scan, forMode: .common)
+        workspaceScanTimer = scan
+    }
+
+    var compatibilityMinSize: CGSize {
+        let cfgW = CGFloat(configStore.configuration.workspace.minimumWidth)
+        let cfgH = CGFloat(configStore.configuration.workspace.minimumHeight)
+        // WPS 灵犀 requires 960x680, which is the global compatibility minimum
+        return CGSize(width: max(960.0, cfgW), height: max(680.0, cfgH))
+    }
+
+    func clampToCanonicalConstraints(_ frame: CGRect) -> CGRect {
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) ?? NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+        let minAllowedTargetX = visible.minX + railWidth
+        let minSize = compatibilityMinSize
+
+        var clamped = frame
+        if clamped.width < minSize.width {
+            clamped.size.width = minSize.width
+        }
+        if clamped.height < minSize.height {
+            clamped.size.height = minSize.height
+        }
+        if clamped.maxX > visible.maxX {
+            clamped.origin.x = visible.maxX - clamped.size.width
+        }
+        if clamped.minX < minAllowedTargetX {
+            clamped.origin.x = minAllowedTargetX
+            clamped.size.width = min(clamped.size.width, visible.maxX - minAllowedTargetX)
+        }
+        if clamped.size.height > visible.height {
+            clamped.size.height = visible.height
+        }
+        if clamped.maxY > visible.maxY {
+            clamped.origin.y = visible.maxY - clamped.size.height
+        }
+        if clamped.origin.y < visible.minY {
+            clamped.origin.y = visible.minY
+        }
+        return CGRect(
+            x: clamped.origin.x.rounded(),
+            y: clamped.origin.y.rounded(),
+            width: clamped.size.width.rounded(),
+            height: clamped.size.height.rounded()
+        )
+    }
+
+    @objc private func handleAppTermination(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        let pid = app.processIdentifier
+        if windowTracker.currentApp?.processIdentifier == pid {
+            windowTracker.stopTracking(keepLastFrame: true)
+            railWindowController?.show()
+            attachToActiveToolIfAvailable()
+        }
+        refreshOpenTools()
+    }
+
+    @objc private func handleSpaceChange(_ notification: Notification) {
+        if isMinimized || Date() < ignoreActivationUntil { return }
+        if let front = NSWorkspace.shared.frontmostApplication, registeredTool(for: front) != nil {
+            _ = attach(to: front)
+            windowTracker.checkWindowFrame(force: true)
+            orderAdjacentToTargetWindow()
+        }
+    }
+
+    func attachToActiveToolIfAvailable() {
+        guard AccessibilityPermission.isTrusted else { return }
+        if isMinimized { return }
+
+        // 1. Try frontmost application
+        if let front = NSWorkspace.shared.frontmostApplication,
+           attach(to: front) {
+            railWindowController?.setFloatingForManagedTool(true)
+            return
+        }
+
+        // 2. Try any running registered tool with a visible unminimized window
+        for tool in configStore.configuration.tools where tool.enabled {
+            let apps = runningApplications(for: tool)
+            for app in apps {
+                let windows = standardWindows(for: app, tool: tool)
+                if let window = windows.first(where: { !boolAttribute($0, kAXMinimizedAttribute as CFString) }) {
+                    if attachToWindow(window, app: app, tool: tool) {
+                        let isManagedFront = NSWorkspace.shared.frontmostApplication.flatMap({ registeredTool(for: $0) }) != nil
+                        railWindowController?.setFloatingForManagedTool(isManagedFront)
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func handleAppLaunch(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+            handleAppActivation(notification)
+        }
+    }
+
+    @objc private func handleAppActivation(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return }
+        if Date() < ignoreActivationUntil { return }
+        if isSwitchingTool { return }
+
+        if isMinimized {
+            if let tool = registeredTool(for: app) {
+                ignoreActivationUntil = Date().addingTimeInterval(0.8)
+                switchTo(tool)
+                return
+            }
+            if isBrowserApplication(app) {
+                ignoreActivationUntil = Date().addingTimeInterval(0.8)
+                isMinimized = false
+                railWindowController?.show()
+                if attach(to: app) {
+                    railWindowController?.setFloatingForManagedTool(true)
+                    windowTracker.checkWindowFrame(force: true)
+                    orderAdjacentToTargetWindow()
+                    return
+                }
+                isMinimized = true
+                railWindowController?.hide()
+            }
+            return
+        }
+
+        pendingActivationTask?.cancel()
+        pendingActivationTask = nil
+
+        // If the app is already tracked and unminimized, make sure rail is visible and ordered adjacent
+        if let currentApp = windowTracker.currentApp,
+           currentApp.processIdentifier == app.processIdentifier,
+           !isMinimized,
+           let curWin = windowTracker.currentWindow,
+           !boolAttribute(curWin, kAXMinimizedAttribute as CFString) {
+            if isBrowserApplication(app) {
+                if attach(to: app) {
+                    railWindowController?.setFloatingForManagedTool(true)
+                    windowTracker.checkWindowFrame(force: true)
+                    orderAdjacentToTargetWindow()
+                    return
+                }
+                railWindowController?.setFloatingForManagedTool(false)
+                return
+            }
+            railWindowController?.setFloatingForManagedTool(true)
+            windowTracker.checkWindowFrame(force: true)
+            orderAdjacentToTargetWindow()
+            return
+        }
+
+        if attach(to: app) {
+            railWindowController?.setFloatingForManagedTool(true)
+            windowTracker.checkWindowFrame(force: true)
+            orderAdjacentToTargetWindow()
+            return
+        }
+
+        let isBrowser = isBrowserApplication(app)
+        let toolCandidate = registeredTool(for: app)
+
+        if toolCandidate != nil || (isBrowser && hasZeroVisibleWindows(app)) {
+            railWindowController?.setFloatingForManagedTool(true)
+            // App is registered (or browser is launching), but its window hasn't appeared yet
+            // (e.g. Electron apps take 1-4 seconds on startup, or window unminimize animation in progress).
+            // Do NOT hide the rail. Start async polling to attach the moment the window appears.
+            pendingActivationTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let startTime = Date()
+                let timeout: TimeInterval = 8.0
+                while Date().timeIntervalSince(startTime) < timeout {
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    if Task.isCancelled { return }
+
+                    // If user switched to another app, stop waiting
+                    if let front = NSWorkspace.shared.frontmostApplication,
+                       front.processIdentifier != app.processIdentifier {
+                        return
+                    }
+
+                    if self.attach(to: app) {
+                        self.railWindowController?.setFloatingForManagedTool(true)
+                        self.windowTracker.checkWindowFrame(force: true)
+                        self.orderAdjacentToTargetWindow()
+                        return
+                    }
+                }
+
+                // Timed out and still no window found while this app is still frontmost.
+                // Keep rail visible so user can interact with it and switch to other tools.
+            }
+        } else {
+            railWindowController?.setFloatingForManagedTool(false)
+        }
+    }
+
+    private func isBrowserApplication(_ app: NSRunningApplication) -> Bool {
+        let browser = configStore.configuration.browser
+        if let bID = browser.bundleIdentifier, !bID.isEmpty, app.bundleIdentifier == bID {
+            return true
+        }
+        return app.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
+    }
+
+    private func hasZeroVisibleWindows(_ app: NSRunningApplication) -> Bool {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &rawValue) == .success,
+              let axWindows = rawValue as? [AXUIElement] else {
+            return true
+        }
+        return axWindows.isEmpty
+    }
+
+    private func registeredTool(for app: NSRunningApplication) -> ToolItem? {
+        let appBundleID = app.bundleIdentifier?.lowercased() ?? ""
+        let appName = app.localizedName?.lowercased() ?? ""
+        let bundleName = app.bundleURL?.deletingPathExtension().lastPathComponent.lowercased() ?? ""
+
+        for tool in configStore.configuration.tools where tool.enabled {
+            // Check explicit bundleIdentifier
+            if let bID = tool.bundleIdentifier?.lowercased(), !bID.isEmpty, appBundleID == bID {
+                return tool
+            }
+
+            // Check resolved bundleIdentifier
+            if let rID = resolvedBundleIdentifier(for: tool)?.lowercased(), !rID.isEmpty, appBundleID == rID {
+                return tool
+            }
+
+            // Check known alternative bundle identifiers
+            for altID in alternativeBundleIdentifiers(for: tool) {
+                if appBundleID == altID.lowercased() {
+                    return tool
+                }
+            }
+
+            // Check appName / tool.name / bundleName
+            let candidateNames = [tool.appName, tool.name, tool.id].compactMap { $0?.lowercased() }.filter { !$0.isEmpty }
+            for candidate in candidateNames {
+                if appName == candidate || appName.contains(candidate) || candidate.contains(appName) {
+                    return tool
+                }
+                if bundleName == candidate || bundleName.contains(candidate) {
+                    return tool
+                }
+            }
+
+            // Known tool-specific aliases
+            switch tool.id.lowercased() {
+            case "wps-lingxi", "wpslingxi", "lingxi":
+                if appName.contains("灵犀") || appBundleID.contains("lingxi") || bundleName.contains("灵犀") {
+                    return tool
+                }
+            case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+                if tool.kind == .app && (appName == "chatgpt" || appName == "codex" || appBundleID == "com.openai.codex" || appBundleID == "com.openai.chat") {
+                    return tool
+                }
+            case "antigravity":
+                if appName.contains("antigravity") || appBundleID.contains("antigravity") {
+                    return tool
+                }
+            case "workbuddy":
+                if appName.contains("workbuddy") || appBundleID.contains("workbuddy") {
+                    return tool
+                }
+            case "grok-bot", "grokbot":
+                if appName.contains("grok") || appBundleID.contains("anysphere") {
+                    return tool
+                }
+            case "hermes":
+                if appName.contains("hermes") || appBundleID.contains("hermes") {
+                    return tool
+                }
+            default:
+                break
+            }
+
+            // Web PWA candidate
+            if tool.kind == .web && appBundleID.contains("safari.webapp") {
+                if appName == tool.name.lowercased() || appName.contains(tool.name.lowercased()) {
+                    return tool
+                }
+            }
+        }
+        return nil
+    }
+
+    private func alternativeBundleIdentifiers(for tool: ToolItem) -> [String] {
+        switch tool.id.lowercased() {
+        case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+            return ["com.openai.codex", "com.openai.chat"]
+        case "workbuddy":
+            return ["com.tencent.workbuddy.mac"]
+        case "hermes":
+            return ["com.nousresearch.hermes"]
+        case "antigravity":
+            return ["com.google.antigravity", "com.google.antigravity-ide"]
+        case "grok-bot", "grokbot":
+            return ["com.anysphere.sand"]
+        case "wps-lingxi", "wpslingxi", "lingxi":
+            return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
+        default:
+            return []
+        }
+    }
+
+    private func attach(to app: NSRunningApplication) -> Bool {
+        if isBrowserApplication(app) {
+            let appElement = AXUIElementCreateApplication(app.processIdentifier)
+            var rawValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &rawValue) == .success,
+                  let axWindows = rawValue as? [AXUIElement] else { return false }
+
+            let visibleWindows = axWindows.filter { win in
+                let role = stringAttribute(win, kAXRoleAttribute as CFString)
+                guard role == "AXWindow" else { return false }
+                let subrole = stringAttribute(win, kAXSubroleAttribute as CFString)
+                if subrole == "AXFloatingWindow" || subrole == "AXSystemDialog" { return false }
+                return !boolAttribute(win, kAXMinimizedAttribute as CFString)
+            }
+
+            guard let frontWindow = visibleWindows.first else { return false }
+            let frontTitle = stringAttribute(frontWindow, kAXTitleAttribute as CFString) ?? ""
+            let frontDoc = stringAttribute(frontWindow, "AXDocument" as CFString) ?? stringAttribute(frontWindow, "AXURL" as CFString) ?? ""
+
+            func toolMatches(tool: ToolItem) -> Bool {
+                if let u = tool.url, let host = URL(string: u)?.host {
+                    let cleanHost = host.replacingOccurrences(of: "www.", with: "")
+                    if !cleanHost.isEmpty && !frontDoc.isEmpty {
+                        if frontDoc.localizedCaseInsensitiveContains(cleanHost) {
+                            return true
+                        }
+                        if frontDoc.lowercased().hasPrefix("http://") || frontDoc.lowercased().hasPrefix("https://") {
+                            return false
+                        }
+                    }
+                }
+                return tool.titleHints.contains(where: { frontTitle.localizedCaseInsensitiveContains($0) })
+            }
+
+            // 1. Prioritize currently selected tool if its hints or document match
+            if let selID = selectedToolID,
+               let currentTool = configStore.configuration.tools.first(where: { $0.id == selID && $0.kind == .web }),
+               toolMatches(tool: currentTool) {
+                return attachToWindow(frontWindow, app: app, tool: currentTool)
+            }
+
+            // 2. Otherwise match against any enabled web tool
+            for tool in configStore.configuration.tools where tool.enabled && tool.kind == .web {
+                if toolMatches(tool: tool) {
+                    return attachToWindow(frontWindow, app: app, tool: tool)
+                }
+            }
+
+            // 3. Fallback: match by active Chrome tab URL via AppleScript if AXDocument was missing
+            if let tabURL = activeChromeTabURL() {
+                for tool in configStore.configuration.tools where tool.enabled && tool.kind == .web {
+                    if let u = tool.url, let host = URL(string: u)?.host {
+                        let cleanHost = host.replacingOccurrences(of: "www.", with: "")
+                        if !cleanHost.isEmpty && tabURL.localizedCaseInsensitiveContains(cleanHost) {
+                            return attachToWindow(frontWindow, app: app, tool: tool)
+                        }
+                    }
+                }
+            }
+
+            return false
+        }
+
+        guard let tool = registeredTool(for: app) else { return false }
+        let windows = standardWindows(for: app, tool: tool)
+        if let window = preferredWindow(from: windows) {
+            return attachToWindow(window, app: app, tool: tool)
+        }
+        return false
+    }
+
+    @discardableResult
+    private func attachToWindow(_ window: AXUIElement, app: NSRunningApplication, tool: ToolItem) -> Bool {
+        let wasHidden = app.isHidden
+        let wasMinimized = boolAttribute(window, kAXMinimizedAttribute as CFString)
+        if wasHidden || wasMinimized {
+            windowTracker.markRestoring(duration: 1.2)
+        }
+        if wasHidden {
+            setAppHidden(app, false)
+            app.unhide()
+        }
+        if wasMinimized {
+            setMinimized(window, false)
+        }
+
+        selectedToolID = tool.id
+        isMinimized = false
+        railWindowController?.applyAppearance(for: tool)
+
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let currentActual = windowFrame(window)
+        let slot = workspaceSlot(preferred: canonicalStackFrame, fallback: currentActual)
+        let effectiveFrame = clampToCanonicalConstraints(slot)
+        let needsSetFrame = currentActual == nil || !framesAlmostEqual(currentActual!, effectiveFrame)
+
+        if needsSetFrame {
+            setFrame(window, nsFrame: effectiveFrame)
+        }
+
+        canonicalStackFrame = effectiveFrame
+        windowTracker.startTracking(app: app, window: window, tool: tool)
+
+        let railFrame = CGRect(
+            x: effectiveFrame.minX - railWidth,
+            y: effectiveFrame.minY,
+            width: railWidth,
+            height: effectiveFrame.height
+        )
+        railWindowController?.move(to: railFrame)
+
+        let targetWid = Self.windowID(for: window)
+        let sameApp = windowTracker.currentApp?.processIdentifier == app.processIdentifier
+        bringWindowToFront(window, app: app, forceActivate: !sameApp)
+        orderAdjacentToTargetWindow(targetWindowID: targetWid)
+        stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: window)
+
+        if wasMinimized {
+            Task {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if needsSetFrame {
+                    self.setFrame(window, nsFrame: effectiveFrame)
+                }
+                self.bringWindowToFront(window, app: app, forceActivate: false)
+                self.windowTracker.checkWindowFrame(force: true)
+                self.orderAdjacentToTargetWindow(targetWindowID: targetWid)
+            }
+        }
+
+        return true
+    }
+
+    private func alignSameAppRegisteredWindows(to frame: CGRect, activeTool: ToolItem, activeWindow: AXUIElement?) {
+        stackRegisteredWindows(onto: frame, activeTool: activeTool, activeWindow: activeWindow)
+    }
+
+    // TODO: Implement AppleScript Chrome tab URL fallback when AXDocument is unavailable.
+    // Currently a no-op stub. Callers use AXDocument/AXURL as primary path (works on Chrome 120+).
+    private func getChromeWindowTabURLs(maxAge: TimeInterval = 0.5) -> [String: String] {
+        return [:]
+    }
+
+    // TODO: Implement AppleScript active Chrome tab URL fallback.
+    private func activeChromeTabURL() -> String? {
+        return nil
+    }
+
+    func switchTo(_ tool: ToolItem) {
+        guard tool.enabled else { return }
+        NSLog("[ToolSwitchRail] switchTo requested: %@", tool.name)
+
+        guard AccessibilityPermission.isTrusted else {
+            NSLog("[ToolSwitchRail] Accessibility permission NOT trusted! Prompting alert.")
+            AccessibilityPermission.promptIfNeeded()
+            AccessibilityPermission.showPermissionAlert()
+            lastError = "未获得辅助功能权限。如系统设置中已开启，请先关闭再重新开启以刷新签名。"
+            return
+        }
+
+        pendingHideTask?.cancel()
+        pendingHideTask = nil
+
+        if selectedToolID == tool.id,
+           let curWin = windowTracker.currentWindow,
+           let curApp = windowTracker.currentApp,
+           !boolAttribute(curWin, kAXMinimizedAttribute as CFString) {
+            activateApp(curApp)
+            AXUIElementPerformAction(curWin, kAXRaiseAction as CFString)
+            return
+        }
+
+        if isMinimized {
+            isMinimized = false
+            revealHiddenOnStack = true
+            railWindowController?.show()
+        }
+        lastError = nil
+        selectedToolID = tool.id
+        railWindowController?.applyAppearance(for: tool)
+        windowTracker.updateRailWidth(CGFloat(configStore.configuration.workspace.railWidth))
+
+        let targetContentFrame = self.activeContentFrame ?? self.workspaceGeometry().content
+
+        // 1. FAST PATH: Window already exists -> Switch synchronously and instantaneously (<5ms)
+        if let match = self.findWindow(for: tool) {
+            NSLog("[ToolSwitchRail] Found existing window for %@ (instant switch)", tool.name)
+            isSwitchingTool = true
+            self.focus(match, contentFrame: targetContentFrame, tool: tool)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.isSwitchingTool = false
+            }
+            return
+        }
+
+        // 2. SLOW PATH: Tool not running yet -> Launch asynchronously
+        isSwitchingTool = true
+        launchingToolID = tool.id
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.isSwitchingTool = false
+                    self?.launchingToolID = nil
+                }
+            }
+            do {
+                NSLog("[ToolSwitchRail] Launching tool: %@", tool.name)
+                try self.launch(tool)
+                if let match = await self.waitForWindow(for: tool, timeout: 7.0) {
+                    NSLog("[ToolSwitchRail] Window appeared after launch for %@", tool.name)
+                    self.focus(match, contentFrame: targetContentFrame, tool: tool)
+                } else {
+                    self.lastError = "已启动 \(tool.name)，但暂时没有找到匹配窗口。请检查 config.json 里的 appName / bundleId / windowTitleMatch。"
+                    NSLog("[ToolSwitchRail] Error: %@", self.lastError ?? "")
+                }
+            } catch {
+                self.lastError = error.localizedDescription
+                NSLog("[ToolSwitchRail] Catch error: %@", self.lastError ?? "")
+            }
+        }
+    }
+
+    // MARK: - Minimize / Restore
+
+    func minimizeAll() {
+        if isMinimized { return }
+        isMinimized = true
+        ignoreActivationUntil = Date().addingTimeInterval(2.0)
+        pendingActivationTask?.cancel()
+        pendingActivationTask = nil
+        windowTracker.markRestoring(duration: 2.0)
+        railWindowController?.hide()
+        windowTracker.stopTracking(keepLastFrame: true)
+
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        var hiddenPIDs = Set<pid_t>()
+
+        for tool in configStore.configuration.tools where tool.enabled {
+            let apps = runningApplications(for: tool)
+            for app in apps {
+                let pid = app.processIdentifier
+                if pid == selfPID { continue }
+
+                let appName = (app.localizedName ?? "").lowercased()
+                let bundleID = (app.bundleIdentifier ?? "").lowercased()
+                if appName.contains("rustdesk") || bundleID.contains("rustdesk") {
+                    continue
+                }
+
+                if isBrowserApplication(app) {
+                    for win in standardWindows(for: app, tool: tool) {
+                        setMinimized(win, true)
+                    }
+                    continue
+                }
+
+                if hiddenPIDs.contains(pid) { continue }
+                hiddenPIDs.insert(pid)
+                for win in standardWindows(for: app, tool: tool) {
+                    setMinimized(win, true)
+                }
+                setAppHidden(app, true)
+            }
+        }
+    }
+
+    private func scanForExternalMinimize() {
+        refreshOpenTools()
+    }
+
+    func refreshOpenTools() {
+        var ids = Set<String>()
+        for tool in configStore.configuration.tools where tool.enabled {
+            if toolIsOpen(tool) {
+                ids.insert(tool.id)
+            }
+        }
+        if ids != openToolIDs {
+            openToolIDs = ids
+        }
+    }
+
+    private func toolIsOpen(_ tool: ToolItem) -> Bool {
+        if tool.kind == .app {
+            return runningApplications(for: tool).contains { !$0.isTerminated }
+        }
+        return findWindow(for: tool) != nil
+    }
+
+    func minimizeCurrent() {
+        minimizeAll()
+    }
+
+    func restoreCurrent() {
+        if !isMinimized {
+            railWindowController?.show()
+            return
+        }
+        isMinimized = false
+        revealHiddenOnStack = true
+        ignoreActivationUntil = Date().addingTimeInterval(1.5)
+        windowTracker.markRestoring(duration: 1.5)
+        railWindowController?.show()
+
+        let tool = activeTool
+            ?? selectedToolID.flatMap { id in configStore.configuration.tools.first(where: { $0.id == id }) }
+            ?? configStore.configuration.tools.first(where: { $0.enabled })
+        guard let tool else { return }
+        switchTo(tool)
+    }
+
+    func toggleMinimize() {
+        if isMinimized {
+            restoreCurrent()
+        } else {
+            minimizeCurrent()
+        }
+    }
+
+    // MARK: - Maximize / Zoom
+
+    private var isMaximized = false
+    private var unmaximizedContentFrame: CGRect?
+    private var unmaximizedRailFrame: CGRect?
+
+    func toggleMaximize() {
+        guard let target = windowTracker.currentWindow else { return }
+        let screen = screenContainingRail() ?? NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+
+        if isMaximized {
+            isMaximized = false
+            let restoreContent = unmaximizedContentFrame ?? workspaceGeometry().content
+            let restoreRail = CGRect(
+                x: restoreContent.minX - railWidth,
+                y: restoreContent.minY,
+                width: railWidth,
+                height: restoreContent.height
+            )
+            setFrame(target, nsFrame: restoreContent)
+            activeContentFrame = restoreContent
+            if let tool = windowTracker.currentTool {
+                alignSameAppRegisteredWindows(to: restoreContent, activeTool: tool, activeWindow: target)
+            }
+            railWindowController?.move(to: restoreRail)
+            windowTracker.checkWindowFrame(force: true)
+        } else {
+            unmaximizedContentFrame = activeContentFrame ?? windowFrame(target)
+            unmaximizedRailFrame = railWindowController?.window?.frame
+
+            let unifiedContentFrame = CGRect(
+                x: visible.minX + railWidth,
+                y: visible.minY,
+                width: visible.width - railWidth,
+                height: visible.height
+            )
+            let unifiedRailFrame = CGRect(
+                x: visible.minX,
+                y: visible.minY,
+                width: railWidth,
+                height: visible.height
+            )
+
+            isMaximized = true
+            activeContentFrame = unifiedContentFrame
+            setFrame(target, nsFrame: unifiedContentFrame)
+            if let tool = windowTracker.currentTool {
+                alignSameAppRegisteredWindows(to: unifiedContentFrame, activeTool: tool, activeWindow: target)
+            }
+            railWindowController?.move(to: unifiedRailFrame)
+            windowTracker.checkWindowFrame(force: true)
+        }
+    }
+
+    // MARK: - Window Edge Resizing
+
+    func beginRailResize() {
+        windowTracker.isRailDragging = true
+        if isMaximized {
+            isMaximized = false
+        }
+    }
+
+    func handleRailResize(
+        isLeft: Bool,
+        isBottom: Bool,
+        isTop: Bool,
+        dx: CGFloat,
+        dy: CGFloat,
+        startRailFrame: CGRect,
+        startTargetFrame: CGRect
+    ) {
+        let minSize = compatibilityMinSize
+        let minContentW: CGFloat = minSize.width
+        let minContentH: CGFloat = minSize.height
+        let railW = startRailFrame.width
+
+        var newRailX = startRailFrame.minX
+        var newRailY = startRailFrame.minY
+        var newHeight = startRailFrame.height
+
+        var newTargetX = startTargetFrame.minX
+        var newTargetY = startTargetFrame.minY
+        var newTargetW = startTargetFrame.width
+        var newTargetH = startTargetFrame.height
+
+        // Left edge resizing (pulling left edge widens/narrows from the left)
+        if isLeft {
+            let rightAnchor = startTargetFrame.maxX
+            newRailX = min(startRailFrame.minX + dx, rightAnchor - railW - minContentW)
+            newTargetX = newRailX + railW
+            newTargetW = max(minContentW, rightAnchor - newTargetX)
+        }
+
+        // Bottom edge resizing (pulling bottom edge down increases height, up decreases)
+        if isBottom {
+            let topAnchor = startRailFrame.maxY
+            newRailY = min(startRailFrame.minY + dy, topAnchor - minContentH)
+            newHeight = max(minContentH, topAnchor - newRailY)
+            newTargetY = newRailY
+            newTargetH = newHeight
+        }
+
+        // Top edge resizing (pulling top edge up increases height, down decreases)
+        if isTop {
+            let bottomAnchor = startRailFrame.minY
+            newHeight = max(minContentH, startRailFrame.height + dy)
+            newTargetH = newHeight
+            newRailY = bottomAnchor
+            newTargetY = bottomAnchor
+        }
+
+        let newRailFrame = CGRect(x: newRailX, y: newRailY, width: railW, height: newHeight)
+        let newTargetFrame = CGRect(x: newTargetX, y: newTargetY, width: newTargetW, height: newTargetH)
+
+        railWindowController?.move(to: newRailFrame)
+
+        if let target = windowTracker.currentWindow {
+            setFrame(target, nsFrame: newTargetFrame)
+            activeContentFrame = newTargetFrame
+        }
+    }
+
+    func endRailResize() {
+        windowTracker.isRailDragging = false
+        windowTracker.checkWindowFrame(force: true)
+        orderAdjacentToTargetWindow()
+        if let targetFrame = activeContentFrame, let tool = windowTracker.currentTool {
+            alignSameAppRegisteredWindows(to: targetFrame, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        }
+    }
+
+    func resizeToPreset(width: CGFloat, height: CGFloat) {
+        guard let target = windowTracker.currentWindow else { return }
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let current = canonicalStackFrame ?? activeContentFrame ?? windowFrame(target) ?? workspaceGeometry().content
+        let minSize = compatibilityMinSize
+
+        let targetW = max(minSize.width, width - railWidth)
+        let targetH = max(minSize.height, height)
+        let rawContent = CGRect(
+            x: current.minX,
+            y: current.minY,
+            width: targetW,
+            height: targetH
+        )
+        let clampedContent = clampToCanonicalConstraints(rawContent)
+        let newRail = CGRect(
+            x: clampedContent.minX - railWidth,
+            y: clampedContent.minY,
+            width: railWidth,
+            height: clampedContent.height
+        )
+
+        isMaximized = false
+        canonicalStackFrame = clampedContent
+        activeContentFrame = clampedContent
+        setFrame(target, nsFrame: clampedContent)
+        railWindowController?.move(to: newRail)
+        if let tool = windowTracker.currentTool {
+            stackRegisteredWindows(onto: clampedContent, activeTool: tool, activeWindow: target, verify: true)
+        }
+        windowTracker.checkWindowFrame(force: true)
+    }
+
+    func resetToDefaultGeometry() {
+        let geo = workspaceGeometry()
+        if let target = windowTracker.currentWindow {
+            setFrame(target, nsFrame: geo.content)
+        }
+        isMaximized = false
+        railWindowController?.move(to: geo.rail)
+        activeContentFrame = geo.content
+        if let tool = windowTracker.currentTool {
+            alignSameAppRegisteredWindows(to: geo.content, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        }
+        windowTracker.checkWindowFrame(force: true)
+    }
+
+    // MARK: - Unified Window Dragging
+
+    func handleRailDrag(translation: CGSize) {
+        guard let railWindow = railWindowController?.window else { return }
+
+        if dragStartRailOrigin == nil {
+            dragStartRailOrigin = railWindow.frame.origin
+            dragStartAXPoint = windowTracker.currentWindowAXPosition()
+            windowTracker.isRailDragging = true
+        }
+
+        guard let startRail = dragStartRailOrigin else { return }
+
+        // AppKit screen coordinates: moving down decreases y
+        let newRailOrigin = CGPoint(
+            x: startRail.x + translation.width,
+            y: startRail.y - translation.height
+        )
+        railWindowController?.setOrigin(newRailOrigin)
+
+        // If an official app window is currently attached, move it synchronously
+        if let startAX = dragStartAXPoint, let target = windowTracker.currentWindow {
+            // AX screen coordinates: moving down increases y
+            var newAXPoint = CGPoint(
+                x: startAX.x + translation.width,
+                y: startAX.y + translation.height
+            )
+            if let pointVal = AXValueCreate(.cgPoint, &newAXPoint) {
+                AXUIElementSetAttributeValue(target, kAXPositionAttribute as CFString, pointVal)
+            }
+        }
+    }
+
+    func endRailDrag() {
+        windowTracker.isRailDragging = false
+        dragStartRailOrigin = nil
+        dragStartAXPoint = nil
+
+        windowTracker.checkWindowFrame(force: true)
+        orderAdjacentToTargetWindow()
+        if let targetFrame = activeContentFrame, let tool = windowTracker.currentTool {
+            alignSameAppRegisteredWindows(to: targetFrame, activeTool: tool, activeWindow: windowTracker.currentWindow)
+        }
+    }
+
+    func workspaceGeometry() -> (rail: CGRect, content: CGRect) {
+        let cfg = configStore.configuration.workspace
+        let screen = screenContainingRail() ?? NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+
+        let minSize = compatibilityMinSize
+        let totalWidth = min(
+            visible.width - 24,
+            max(minSize.width, visible.width * cfg.widthFraction)
+        )
+        let height = min(
+            visible.height - 24,
+            max(minSize.height, visible.height * cfg.heightFraction)
+        )
+
+        let railWidth = CGFloat(cfg.railWidth)
+        let x = max(visible.minX, visible.midX - totalWidth / 2)
+        let y = visible.midY - height / 2
+
+        let rail = CGRect(x: x, y: y, width: railWidth, height: height)
+        let content = CGRect(x: x + railWidth, y: y, width: min(visible.maxX - (x + railWidth), totalWidth - railWidth), height: height)
+        return (rail, content)
+    }
+
+    private func screenContainingRail() -> NSScreen? {
+        guard let frame = railWindowController?.window?.frame else { return nil }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        return NSScreen.screens.first(where: { $0.frame.contains(center) })
+    }
+
+    private func launch(_ tool: ToolItem) throws {
+        switch tool.kind {
+        case .app:
+            if let bundleID = resolvedBundleIdentifier(for: tool),
+               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
+                    if let error {
+                        print("[WindowManager] Open app failed: \(error)")
+                    }
+                }
+                return
+            }
+
+            if let appName = tool.appName, !appName.isEmpty {
+                try runOpen(arguments: ["-a", appName])
+                return
+            }
+
+            throw RailError.invalidConfiguration("\(tool.name) 缺少有效的 appName 或 bundleIdentifier")
+
+        case .web:
+            guard let url = tool.url, !url.isEmpty else {
+                throw RailError.invalidConfiguration("\(tool.name) 缺少 url")
+            }
+            try launchBrowserApp(urlString: url)
+        }
+    }
+
+    private func launchBrowserApp(urlString: String) throws {
+        let browser = configStore.configuration.browser
+        var applicationURL: URL?
+
+        if let bundleID = browser.bundleIdentifier, !bundleID.isEmpty {
+            applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        }
+
+        if applicationURL == nil {
+            let candidate = URL(fileURLWithPath: "/Applications/\(browser.appName).app")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                applicationURL = candidate
+            }
+        }
+
+        if let applicationURL,
+           let bundle = Bundle(url: applicationURL),
+           let executableURL = bundle.executableURL {
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = ["--app=\(urlString)", "--new-window"]
+            try process.run()
+            return
+        }
+
+        try runOpen(arguments: ["-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
+    }
+
+    private func runOpen(arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = arguments
+        try process.run()
+    }
+
+    private func waitForWindow(for tool: ToolItem, timeout: TimeInterval) async -> WindowMatch? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let match = findWindow(for: tool) {
+                return match
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return nil
+    }
+
+    private func findWindow(for tool: ToolItem) -> WindowMatch? {
+        let apps = runningApplications(for: tool)
+        for app in apps {
+            let windows = standardWindows(for: app, tool: tool)
+            if let window = preferredWindow(from: windows) {
+                return WindowMatch(app: app, window: window)
+            }
+        }
+        return nil
+    }
+
+    private func runningApplications(for tool: ToolItem) -> [NSRunningApplication] {
+        let workspace = NSWorkspace.shared
+
+        switch tool.kind {
+        case .app:
+            var apps: [NSRunningApplication] = []
+
+            if let bundleID = resolvedBundleIdentifier(for: tool) {
+                apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
+            }
+
+            for altID in alternativeBundleIdentifiers(for: tool) {
+                if !apps.contains(where: { $0.bundleIdentifier == altID }) {
+                    apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: altID))
+                }
+            }
+
+            let candidateNames = [tool.appName, tool.name, tool.id].compactMap { $0?.lowercased() }.filter { !$0.isEmpty }
+            if apps.isEmpty {
+                let matching = workspace.runningApplications.filter { app in
+                    guard let name = app.localizedName?.lowercased() else { return false }
+                    return candidateNames.contains(where: { name == $0 || name.contains($0) || $0.contains(name) })
+                }
+                apps.append(contentsOf: matching)
+            }
+
+            // Fallbacks for known tools
+            if apps.isEmpty {
+                switch tool.id.lowercased() {
+                case "wps-lingxi", "wpslingxi", "lingxi":
+                    apps.append(contentsOf: workspace.runningApplications.filter {
+                        ($0.localizedName?.contains("灵犀") == true) || ($0.bundleIdentifier?.contains("lingxi") == true)
+                    })
+                case "antigravity":
+                    apps.append(contentsOf: workspace.runningApplications.filter {
+                        ($0.localizedName?.lowercased().contains("antigravity") == true) || ($0.bundleIdentifier?.contains("antigravity") == true)
+                    })
+                case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+                    apps.append(contentsOf: workspace.runningApplications.filter {
+                        ($0.localizedName?.lowercased() == "chatgpt") || ($0.bundleIdentifier == "com.openai.codex")
+                    })
+                default:
+                    break
+                }
+            }
+
+            var seenPIDs = Set<pid_t>()
+            return apps.filter { seenPIDs.insert($0.processIdentifier).inserted }
+
+        case .web:
+            var apps: [NSRunningApplication] = []
+
+            if let bundleID = configStore.configuration.browser.bundleIdentifier,
+               !bundleID.isEmpty {
+                apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
+            }
+            if apps.isEmpty {
+                let browserName = configStore.configuration.browser.appName
+                apps.append(contentsOf: workspace.runningApplications.filter {
+                    $0.localizedName?.localizedCaseInsensitiveCompare(browserName) == .orderedSame
+                })
+            }
+
+            let hints = tool.titleHints
+            for app in workspace.runningApplications {
+                if apps.contains(where: { $0.processIdentifier == app.processIdentifier }) { continue }
+                if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue }
+                if isBrowserApplication(app) { continue }
+                if let native = registeredTool(for: app), native.kind == .app { continue }
+
+                let name = app.localizedName ?? ""
+                let bundleID = app.bundleIdentifier ?? ""
+                let isWebAppProcess = bundleID.hasPrefix("com.apple.Safari.WebApp")
+                    || bundleID.contains("Chrome.app.")
+                    || bundleID.lowercased().contains("chrom")
+
+                let nameHit = hints.contains { name.localizedCaseInsensitiveContains($0) }
+                    || name.localizedCaseInsensitiveCompare(tool.name) == .orderedSame
+                if nameHit && (isWebAppProcess || !bundleID.hasPrefix("com.apple.")) {
+                    apps.append(app)
+                }
+            }
+
+            var seenPIDs = Set<pid_t>()
+            return apps.filter { seenPIDs.insert($0.processIdentifier).inserted }
+        }
+    }
+
+    private func resolvedBundleIdentifier(for tool: ToolItem) -> String? {
+        if let explicit = tool.bundleIdentifier, !explicit.isEmpty {
+            return explicit
+        }
+        switch tool.id.lowercased() {
+        case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac": return "com.openai.codex"
+        case "workbuddy": return "com.tencent.workbuddy.mac"
+        case "hermes": return "com.nousresearch.hermes"
+        case "antigravity": return "com.google.antigravity"
+        case "grok-bot", "grokbot": return "com.anysphere.sand"
+        case "wps-lingxi", "wpslingxi", "lingxi": return "com.wps.lingxi"
+        default: return nil
+        }
+    }
+
+    private func standardWindows(for app: NSRunningApplication, tool: ToolItem) -> [AXUIElement] {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXWindowsAttribute as CFString,
+            &rawValue
+        ) == .success,
+        let windows = rawValue as? [AXUIElement] else {
+            return []
+        }
+
+        let validWindows = windows.filter { window in
+            let role = stringAttribute(window, kAXRoleAttribute as CFString)
+            guard role == "AXWindow" else { return false }
+
+            let subrole = stringAttribute(window, kAXSubroleAttribute as CFString)
+            if subrole == "AXFloatingWindow" || subrole == "AXSystemDialog" {
+                return false
+            }
+
+            // Exclude dummy 0x0 startup windows
+            let isMin = boolAttribute(window, kAXMinimizedAttribute as CFString)
+            if !isMin, let frame = windowFrame(window) {
+                if frame.width < 100 || frame.height < 100 {
+                    return false
+                }
+            }
+            return true
+        }
+
+        if tool.kind == .web {
+            let hints = tool.titleHints
+            var matching: [AXUIElement] = []
+
+            var cleanHost: String? = nil
+            if let targetURL = tool.url, let host = URL(string: targetURL)?.host {
+                let h = host.replacingOccurrences(of: "www.", with: "")
+                if !h.isEmpty {
+                    cleanHost = h
+                }
+            }
+
+            for window in validWindows {
+                let doc = stringAttribute(window, "AXDocument" as CFString) ?? stringAttribute(window, "AXURL" as CFString) ?? ""
+
+                // 1. Direct AXDocument URL check (instant, zero IPC, immune to chat renaming)
+                if let host = cleanHost, !doc.isEmpty {
+                    if doc.localizedCaseInsensitiveContains(host) {
+                        matching.append(window)
+                        continue
+                    } else if doc.lowercased().hasPrefix("http://") || doc.lowercased().hasPrefix("https://") {
+                        // Belongs to a different web domain, skip
+                        continue
+                    }
+                }
+
+                // 2. Title hints fallback
+                let title = stringAttribute(window, kAXTitleAttribute as CFString) ?? ""
+                if !hints.isEmpty && hints.contains(where: { title.localizedCaseInsensitiveContains($0) }) {
+                    matching.append(window)
+                    continue
+                }
+            }
+
+            // 3. AppleScript tab URL fallback if AXDocument was unsupported
+            if matching.isEmpty, isBrowserApplication(app), let host = cleanHost {
+                let urlMap = getChromeWindowTabURLs()
+                for window in validWindows {
+                    let title = stringAttribute(window, kAXTitleAttribute as CFString) ?? ""
+                    for (tabTitle, tabURL) in urlMap {
+                        if (title.contains(tabTitle) || tabTitle.contains(title)) && tabURL.localizedCaseInsensitiveContains(host) {
+                            matching.append(window)
+                            break
+                        }
+                    }
+                }
+            }
+
+            if !matching.isEmpty {
+                return matching
+            }
+
+            if validWindows.count == 1 && app.bundleIdentifier != configStore.configuration.browser.bundleIdentifier {
+                return validWindows
+            }
+            return []
+        }
+
+        let hints = tool.titleHints
+        if !hints.isEmpty {
+            let matching = validWindows.filter { window in
+                let title = stringAttribute(window, kAXTitleAttribute as CFString) ?? ""
+                return hints.contains { hint in
+                    title.localizedCaseInsensitiveContains(hint)
+                }
+            }
+            if !matching.isEmpty {
+                return matching
+            }
+        }
+
+        return validWindows
+    }
+
+    private func preferredWindow(from windows: [AXUIElement]) -> AXUIElement? {
+        if let mainWin = windows.first(where: { boolAttribute($0, kAXMainAttribute as CFString) && !boolAttribute($0, kAXMinimizedAttribute as CFString) }) {
+            return mainWin
+        }
+        if let unminimized = windows.first(where: { !boolAttribute($0, kAXMinimizedAttribute as CFString) }) {
+            return unminimized
+        }
+        return windows.first
+    }
+
+    private func focus(_ match: WindowMatch, contentFrame: CGRect, tool: ToolItem) {
+        let wasHidden = match.app.isHidden
+        let wasMinimized = boolAttribute(match.window, kAXMinimizedAttribute as CFString)
+        if wasHidden || wasMinimized {
+            windowTracker.markRestoring(duration: 1.2)
+        }
+        if wasHidden {
+            setAppHidden(match.app, false)
+            match.app.unhide()
+        }
+        if wasMinimized {
+            setMinimized(match.window, false)
+        }
+
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let currentActual = windowFrame(match.window)
+        let slot = workspaceSlot(preferred: canonicalStackFrame ?? contentFrame, fallback: currentActual)
+        let effectiveFrame = clampToCanonicalConstraints(slot)
+
+        isMinimized = false
+
+        let needsSetFrame = currentActual == nil || !framesAlmostEqual(currentActual!, effectiveFrame)
+        if needsSetFrame {
+            setFrame(match.window, nsFrame: effectiveFrame)
+        }
+
+        let railFrame = CGRect(
+            x: effectiveFrame.minX - railWidth,
+            y: effectiveFrame.minY,
+            width: railWidth,
+            height: effectiveFrame.height
+        )
+        railWindowController?.move(to: railFrame)
+
+        let targetWindowID = Self.windowID(for: match.window)
+        let sameApp = windowTracker.currentApp?.processIdentifier == match.app.processIdentifier
+
+        canonicalStackFrame = effectiveFrame
+        windowTracker.startTracking(app: match.app, window: match.window, tool: tool)
+
+        bringWindowToFront(match.window, app: match.app, forceActivate: !sameApp)
+        orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
+        stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: match.window)
+
+        if wasMinimized || wasHidden {
+            Task {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if needsSetFrame {
+                    self.setFrame(match.window, nsFrame: effectiveFrame)
+                }
+                self.bringWindowToFront(match.window, app: match.app, forceActivate: false)
+                self.windowTracker.checkWindowFrame(force: true)
+                self.orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
+            }
+        }
+    }
+
+    private func hideOtherRegisteredApps(except activeTool: ToolItem) {
+        let frame = activeContentFrame ?? workspaceGeometry().content
+        stackRegisteredWindows(onto: frame, activeTool: activeTool, activeWindow: windowTracker.currentWindow)
+    }
+
+    private func allStandardWindows(for app: NSRunningApplication) -> [AXUIElement] {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXWindowsAttribute as CFString,
+            &rawValue
+        ) == .success,
+        let windows = rawValue as? [AXUIElement] else {
+            return []
+        }
+
+        return windows.filter { window in
+            let role = stringAttribute(window, kAXRoleAttribute as CFString)
+            guard role == "AXWindow" else { return false }
+
+            let subrole = stringAttribute(window, kAXSubroleAttribute as CFString)
+            if subrole == "AXFloatingWindow" || subrole == "AXSystemDialog" {
+                return false
+            }
+
+            let isMin = boolAttribute(window, kAXMinimizedAttribute as CFString)
+            if !isMin, let frame = windowFrame(window) {
+                if frame.width < 100 || frame.height < 100 {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    private func stackRegisteredWindows(onto frame: CGRect, activeTool: ToolItem, activeWindow: AXUIElement?, verify: Bool = false) {
+        guard !isMinimized else { return }
+        guard frame.width > 80, frame.height > 80 else { return }
+
+        let stacked = CGRect(
+            x: frame.minX.rounded(),
+            y: frame.minY.rounded(),
+            width: frame.width.rounded(),
+            height: frame.height.rounded()
+        )
+        let tracked = activeWindow ?? windowTracker.currentWindow
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        var didMoveAnyWindow = false
+        var seenWindows: [AXUIElement] = []
+        var movedWindows: [AXUIElement] = []
+
+        let revealHidden = revealHiddenOnStack
+        revealHiddenOnStack = false
+
+        for tool in configStore.configuration.tools where tool.enabled {
+            let apps = runningApplications(for: tool)
+            for app in apps {
+                let pid = app.processIdentifier
+                if pid == selfPID { continue }
+                let appName = (app.localizedName ?? "").lowercased()
+                let bundleID = (app.bundleIdentifier ?? "").lowercased()
+                if appName.contains("rustdesk") || bundleID.contains("rustdesk") {
+                    continue
+                }
+
+                if app.isHidden && !isBrowserApplication(app) {
+                    if !revealHidden { continue }
+                    setAppHidden(app, false)
+                }
+                let windows = standardWindows(for: app, tool: tool)
+
+                for win in windows {
+                    if let tracked, CFEqual(win, tracked) { continue }
+                    if seenWindows.contains(where: { CFEqual($0, win) }) { continue }
+                    seenWindows.append(win)
+
+                    if boolAttribute(win, kAXMinimizedAttribute as CFString) {
+                        if !revealHidden { continue }
+                        setMinimized(win, false)
+                    }
+                    if let current = windowFrame(win), framesAlmostEqual(current, stacked) {
+                        continue
+                    }
+                    setFrame(win, nsFrame: stacked)
+                    if let actual = windowFrame(win) {
+                        let widthDelta = stacked.width - actual.width
+                        let heightDelta = stacked.height - actual.height
+                        if widthDelta > 0.5 || heightDelta > 0.5 {
+                            let adjusted = CGRect(
+                                x: stacked.minX + widthDelta,
+                                y: stacked.minY + heightDelta,
+                                width: actual.width,
+                                height: actual.height
+                            )
+                            setFrame(win, nsFrame: adjusted)
+                        }
+                    }
+                    didMoveAnyWindow = true
+                    movedWindows.append(win)
+                }
+            }
+        }
+
+        if didMoveAnyWindow, let tracked {
+            AXUIElementPerformAction(tracked, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(tracked, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(tracked, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    private func bringWindowToFront(_ window: AXUIElement, app: NSRunningApplication, forceActivate: Bool = true) {
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        if forceActivate {
+            activateApp(app)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    private func workspaceSlot(preferred: CGRect?, fallback: CGRect?) -> CGRect {
+        let minSize = compatibilityMinSize
+        var slot: CGRect
+        if let preferred, preferred.width > 100, preferred.height > 100 {
+            slot = preferred
+        } else if let fallback, fallback.width > 100, fallback.height > 100 {
+            slot = fallback
+        } else {
+            slot = workspaceGeometry().content
+        }
+
+        if slot.width < minSize.width {
+            slot.size.width = minSize.width
+        }
+        if slot.height < minSize.height {
+            slot.size.height = minSize.height
+        }
+        return slot
+    }
+
+    private func framesAlmostEqual(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 0.5 &&
+        abs(a.minY - b.minY) < 0.5 &&
+        abs(a.width - b.width) < 0.5 &&
+        abs(a.height - b.height) < 0.5
+    }
+
+    private func setAppHidden(_ app: NSRunningApplication, _ hidden: Bool) {
+        if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return }
+        if hidden {
+            if !app.isHidden {
+                app.hide()
+            }
+        } else {
+            if app.isHidden {
+                app.unhide()
+            }
+        }
+    }
+
+    private func setMinimized(_ window: AXUIElement, _ minimized: Bool) {
+        AXUIElementSetAttributeValue(
+            window,
+            kAXMinimizedAttribute as CFString,
+            minimized ? kCFBooleanTrue : kCFBooleanFalse
+        )
+    }
+
+    private func setFrame(_ window: AXUIElement, nsFrame: CGRect) {
+        guard let current = windowFrame(window) else {
+            let axFrame = convertToAXCoordinates(nsFrame)
+            var pt = CGPoint(x: axFrame.minX, y: axFrame.minY)
+            var sz = CGSize(width: axFrame.width, height: axFrame.height)
+            if let pVal = AXValueCreate(.cgPoint, &pt) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pVal)
+            }
+            if let sVal = AXValueCreate(.cgSize, &sz) {
+                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sVal)
+            }
+            return
+        }
+
+        let posChanged = abs(current.minX - nsFrame.minX) >= 1 || abs(current.minY - nsFrame.minY) >= 1
+        let sizeChanged = abs(current.width - nsFrame.width) >= 1 || abs(current.height - nsFrame.height) >= 1
+
+        guard posChanged || sizeChanged else { return }
+
+        let axFrame = convertToAXCoordinates(nsFrame)
+        var point = CGPoint(x: axFrame.minX, y: axFrame.minY)
+        var size = CGSize(width: axFrame.width, height: axFrame.height)
+
+        let pointValue = AXValueCreate(.cgPoint, &point)
+        let sizeValue = AXValueCreate(.cgSize, &size)
+
+        if !sizeChanged {
+            // Only position changed (origin shift / drag align): 1 single AX call, zero DOM reflow or GPU reallocation
+            if let pointValue {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pointValue)
+            }
+            return
+        }
+
+        if !posChanged {
+            // Only size changed
+            if let sizeValue {
+                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            }
+            return
+        }
+
+        // Both changed: order wisely to prevent screen-boundary clamping without redundant calls
+        if nsFrame.width <= current.width && nsFrame.height <= current.height {
+            // Shrinking: size first, then position
+            if let sizeValue {
+                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            }
+            if let pointValue {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pointValue)
+            }
+        } else {
+            // Growing or moving left/up: position first, then size
+            if let pointValue {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pointValue)
+            }
+            if let sizeValue {
+                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            }
+        }
+    }
+
+    func windowFrame(_ window: AXUIElement) -> CGRect? {
+        var posVal: CFTypeRef?
+        var sizeVal: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posVal) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeVal) == .success,
+              let posAX = posVal, let sizeAX = sizeVal else {
+            return nil
+        }
+        var pt = CGPoint.zero
+        var sz = CGSize.zero
+        if CFGetTypeID(posAX) == AXValueGetTypeID() {
+            AXValueGetValue(posAX as! AXValue, .cgPoint, &pt)
+        }
+        if CFGetTypeID(sizeAX) == AXValueGetTypeID() {
+            AXValueGetValue(sizeAX as! AXValue, .cgSize, &sz)
+        }
+        guard sz.width > 50 && sz.height > 50 else { return nil }
+        let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height ?? NSScreen.main?.frame.height ?? 1080
+        return CGRect(x: pt.x, y: primaryHeight - pt.y - sz.height, width: sz.width, height: sz.height)
+    }
+
+    private func convertToAXCoordinates(_ nsFrame: CGRect) -> CGRect {
+        guard let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first else {
+            return nsFrame
+        }
+        let y = primary.frame.height - nsFrame.maxY
+        return CGRect(x: nsFrame.minX, y: y, width: nsFrame.width, height: nsFrame.height)
+    }
+
+    private func stringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private func boolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return false
+        }
+        return (value as? Bool) ?? false
+    }
+
+    // MARK: - WindowTrackerDelegate
+
+    func windowTracker(_ tracker: WindowTracker, didUpdateTargetFrame targetFrame: CGRect, railFrame: CGRect) {
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(targetFrame) }) ?? NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+        let minAllowedTargetX = visible.minX + railWidth
+
+        if isMaximized {
+            let unifiedContentFrame = CGRect(
+                x: visible.minX + railWidth,
+                y: visible.minY,
+                width: visible.width - railWidth,
+                height: visible.height
+            )
+            let unifiedRailFrame = CGRect(
+                x: visible.minX,
+                y: visible.minY,
+                width: railWidth,
+                height: visible.height
+            )
+
+            if !tracker.isMouseDragging, let targetWindow = tracker.currentWindow,
+               (abs(targetFrame.minX - unifiedContentFrame.minX) > 2 || abs(targetFrame.width - unifiedContentFrame.width) > 2) {
+                setFrame(targetWindow, nsFrame: unifiedContentFrame)
+            }
+            activeContentFrame = unifiedContentFrame
+            railWindowController?.move(to: unifiedRailFrame)
+            return
+        }
+
+        // Prevent rail from being pushed off-screen to the left during drag
+        if targetFrame.minX < minAllowedTargetX {
+            let adjustedRailFrame = CGRect(
+                x: visible.minX,
+                y: targetFrame.minY,
+                width: railWidth,
+                height: targetFrame.height
+            )
+            canonicalStackFrame = targetFrame
+            railWindowController?.move(to: adjustedRailFrame)
+        } else {
+            canonicalStackFrame = targetFrame
+            railWindowController?.move(to: railFrame)
+        }
+        // Do not restack other tools during live drag — that flashes every sibling window.
+    }
+
+    func windowTrackerDidMinimizeTarget(_ tracker: WindowTracker) {
+        if isMinimized { return }
+        minimizeAll()
+    }
+
+    func windowTrackerDidSettle(_ tracker: WindowTracker) {
+        orderAdjacentToTargetWindow()
+
+        guard let targetWindow = tracker.currentWindow, let currentFrame = canonicalStackFrame else { return }
+
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(currentFrame) }) ?? NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+
+        let clampedFrame: CGRect
+        if isMaximized {
+            clampedFrame = CGRect(
+                x: visible.minX + railWidth,
+                y: visible.minY,
+                width: visible.width - railWidth,
+                height: visible.height
+            )
+        } else {
+            clampedFrame = clampToCanonicalConstraints(currentFrame)
+        }
+        canonicalStackFrame = clampedFrame
+
+        let currentActual = windowFrame(targetWindow)
+        if currentActual == nil || !framesAlmostEqual(currentActual!, clampedFrame) {
+            setFrame(targetWindow, nsFrame: clampedFrame)
+        }
+
+        let adjustedRailFrame = CGRect(
+            x: clampedFrame.minX - railWidth,
+            y: clampedFrame.minY,
+            width: railWidth,
+            height: clampedFrame.height
+        )
+        railWindowController?.move(to: adjustedRailFrame)
+
+        // P0: Always synchronize all background managed windows to canonicalStackFrame on mouseUp!
+        if let tool = tracker.currentTool {
+            stackRegisteredWindows(onto: clampedFrame, activeTool: tool, activeWindow: targetWindow, verify: true)
+        }
+
+        // Re-affirm foreground target window is at the top
+        AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+        railWindowController?.setFloatingForManagedTool(true)
+        orderAdjacentToTargetWindow()
+    }
+
+    func windowTrackerDidDeminimizeTarget(_ tracker: WindowTracker) {
+        if isMinimized { return }
+        railWindowController?.show()
+        if let target = tracker.currentWindow {
+            AXUIElementPerformAction(target, kAXRaiseAction as CFString)
+            orderAdjacentToTargetWindow()
+        }
+    }
+
+    func windowTrackerDidDestroyTarget(_ tracker: WindowTracker) {
+        if isMinimized { return }
+        tracker.stopTracking(keepLastFrame: true)
+        railWindowController?.show()
+        attachToActiveToolIfAvailable()
+    }
+}
+
+private struct WindowMatch {
+    let app: NSRunningApplication
+    let window: AXUIElement
+}
+
+enum RailError: LocalizedError {
+    case invalidConfiguration(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration(let message): return message
+        }
+    }
+}

@@ -1,0 +1,134 @@
+{
+  "workspace": {
+    "railWidth": 56,
+    "widthFraction": 0.84,
+    "heightFraction": 0.82,
+    "minimumWidth": 960,
+    "minimumHeight": 680,
+    "appearance": "system",
+    "minimizeOtherRegisteredWindows": true
+  },
+  "browser": {
+    "appName": "Google Chrome",
+    "bundleIdentifier": "com.google.Chrome"
+  },
+  "tools": [
+    {
+      "id": "codex",
+      "name": "ChatGPT (Mac)",
+      "kind": "app",
+      "appName": "ChatGPT",
+      "bundleIdentifier": "com.openai.codex",
+      "url": null,
+      "titleContains": ["ChatGPT", "Codex"],
+      "symbolName": "terminal",
+      "iconPath": null,
+      "hotkeyIndex": 1,
+      "enabled": true
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "kind": "app",
+      "appName": "Hermes",
+      "bundleIdentifier": "com.nousresearch.hermes",
+      "url": null,
+      "titleContains": ["Hermes"],
+      "symbolName": "h.circle",
+      "iconPath": null,
+      "hotkeyIndex": 2,
+      "enabled": true
+    },
+    {
+      "id": "antigravity",
+      "name": "Antigravity",
+      "kind": "app",
+      "appName": "Antigravity",
+      "bundleIdentifier": "com.google.antigravity",
+      "url": null,
+      "titleContains": ["Antigravity"],
+      "symbolName": "a.circle",
+      "iconPath": null,
+      "hotkeyIndex": 3,
+      "enabled": true
+    },
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "app",
+      "appName": "WorkBuddy",
+      "bundleIdentifier": "com.tencent.workbuddy.mac",
+      "url": null,
+      "titleContains": ["WorkBuddy"],
+      "symbolName": "w.circle",
+      "iconPath": null,
+      "hotkeyIndex": 4,
+      "enabled": true
+    },
+    {
+      "id": "grok-bot",
+      "name": "Grok Bot",
+      "kind": "app",
+      "appName": "Grok Bot",
+      "bundleIdentifier": "com.anysphere.sand",
+      "url": null,
+      "titleContains": ["Grok Bot"],
+      "symbolName": "bolt.horizontal.circle",
+      "iconPath": null,
+      "hotkeyIndex": 5,
+      "enabled": true
+    },
+    {
+      "id": "chatgpt-web",
+      "name": "ChatGPT (Web)",
+      "kind": "web",
+      "appName": null,
+      "bundleIdentifier": null,
+      "url": "https://chatgpt.com",
+      "titleContains": ["ChatGPT", "chatgpt.com"],
+      "symbolName": "message",
+      "iconPath": "~/Library/Application Support/ToolSwitchRail/icons/chatgpt-web.png",
+      "hotkeyIndex": 6,
+      "enabled": true
+    },
+    {
+      "id": "gemini-web",
+      "name": "Gemini",
+      "kind": "web",
+      "appName": null,
+      "bundleIdentifier": null,
+      "url": "https://gemini.google.com",
+      "titleContains": ["Gemini"],
+      "symbolName": "sparkles",
+      "iconPath": null,
+      "hotkeyIndex": 7,
+      "enabled": true
+    },
+    {
+      "id": "grok-web",
+      "name": "Grok",
+      "kind": "web",
+      "appName": null,
+      "bundleIdentifier": null,
+      "url": "https://grok.com",
+      "titleContains": ["Grok", "grok.com", "xAI"],
+      "symbolName": "xmark",
+      "iconPath": null,
+      "hotkeyIndex": 8,
+      "enabled": true
+    },
+    {
+      "id": "wps-lingxi",
+      "name": "WPS 灵犀",
+      "kind": "app",
+      "appName": "WPS 灵犀",
+      "bundleIdentifier": "com.wps.lingxi",
+      "url": null,
+      "titleContains": ["WPS 灵犀", "灵犀"],
+      "symbolName": "sparkle",
+      "iconPath": "/Applications/WPS 灵犀.app/Contents/Resources/icon.png",
+      "hotkeyIndex": 9,
+      "enabled": true
+    }
+  ]
+}
