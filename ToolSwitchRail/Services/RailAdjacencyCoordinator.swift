@@ -5,11 +5,9 @@ import ApplicationServices
 ///
 ///     rail.maxX == managedWindow.minX
 ///
-/// Some third-party apps (especially Electron apps) can move/zoom themselves back to
-/// the screen's left edge after Tool Switch Rail has already placed them. When that
-/// happens the rail would otherwise overlap the app's own sidebar and traffic lights.
-/// This coordinator re-checks the exact tracked window after activation and mouse-up,
-/// then repairs only that window if it crosses into the rail's reserved strip.
+/// It also performs a final integrity pass for already-visible native stack members so
+/// a background Electron app cannot restore an old cached frame and peek out above or
+/// beside the foreground tool. Hidden/minimized siblings are never woken by this pass.
 @MainActor
 final class RailAdjacencyCoordinator {
     private unowned let configStore: ConfigStore
@@ -78,9 +76,9 @@ final class RailAdjacencyCoordinator {
         enforcementGeneration &+= 1
         let generation = enforcementGeneration
 
-        // First check catches ordinary drags/activations. Follow-up checks catch apps
-        // that finish their own zoom/restore animation slightly later and overwrite AX.
-        for delay: UInt64 in [0, 80_000_000, 220_000_000] {
+        // The later checks catch Electron apps that finish their own restore/zoom
+        // animation after the foreground tool has already settled.
+        for delay: UInt64 in [0, 80_000_000, 220_000_000, 500_000_000] {
             Task { @MainActor [weak self] in
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: delay)
@@ -111,50 +109,159 @@ final class RailAdjacencyCoordinator {
         let visible = screen.visibleFrame
         let minimumTargetX = visible.minX + railWidth
 
-        // Normal case: keep the rail exactly adjacent if its own origin drifted.
+        let canonical: CGRect
         if actualFrame.minX >= minimumTargetX - 0.5 {
-            let expectedRail = CGRect(
-                x: actualFrame.minX - railWidth,
-                y: actualFrame.minY,
-                width: railWidth,
-                height: actualFrame.height
-            )
-            railWindowController?.move(to: expectedRail)
-            windowManager.activeContentFrame = actualFrame
-            return
+            canonical = rounded(actualFrame)
+        } else {
+            // The app entered the rail's reserved strip. Move it right and, if needed,
+            // trim only the right edge so the complete workspace remains on-screen.
+            var corrected = actualFrame
+            corrected.origin.x = minimumTargetX
+            corrected.size.width = min(corrected.width, visible.maxX - minimumTargetX)
+            corrected.size.height = min(corrected.height, visible.height)
+
+            if corrected.maxY > visible.maxY {
+                corrected.origin.y = visible.maxY - corrected.height
+            }
+            if corrected.minY < visible.minY {
+                corrected.origin.y = visible.minY
+            }
+
+            canonical = rounded(corrected)
+            setFrame(targetWindow, nsFrame: canonical)
         }
 
-        // The app has entered the rail's reserved strip. Move it right. If the app was
-        // zoomed to screen width, reduce only the right-side width needed to keep the
-        // complete workspace on-screen instead of covering the app with the rail.
-        var corrected = actualFrame
-        corrected.origin.x = minimumTargetX
-        corrected.size.width = min(corrected.width, visible.maxX - minimumTargetX)
-        corrected.size.height = min(corrected.height, visible.height)
-
-        if corrected.maxY > visible.maxY {
-            corrected.origin.y = visible.maxY - corrected.height
-        }
-        if corrected.minY < visible.minY {
-            corrected.origin.y = visible.minY
-        }
-
-        corrected = CGRect(
-            x: corrected.minX.rounded(),
-            y: corrected.minY.rounded(),
-            width: corrected.width.rounded(),
-            height: corrected.height.rounded()
-        )
-
-        setFrame(targetWindow, nsFrame: corrected)
-        windowManager.activeContentFrame = corrected
-
+        windowManager.activeContentFrame = canonical
         railWindowController?.move(to: CGRect(
-            x: corrected.minX - railWidth,
-            y: corrected.minY,
+            x: canonical.minX - railWidth,
+            y: canonical.minY,
             width: railWidth,
-            height: corrected.height
+            height: canonical.height
         ))
+
+        // Warm stack invariant: every already-visible native sibling must end with the
+        // same exact frame as the current foreground window. Never unhide or deminimize.
+        reconcileVisibleNativeSiblings(
+            to: canonical,
+            excludingPID: frontApp.processIdentifier,
+            targetWindowID: targetWindowID
+        )
+    }
+
+    private func reconcileVisibleNativeSiblings(
+        to canonical: CGRect,
+        excludingPID activePID: pid_t,
+        targetWindowID: CGWindowID
+    ) {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        var seenPIDs = Set<pid_t>()
+
+        for tool in configStore.configuration.tools where tool.enabled && tool.kind == .app {
+            for app in runningApplications(for: tool) {
+                let pid = app.processIdentifier
+                if pid == selfPID || pid == activePID { continue }
+                if !seenPIDs.insert(pid).inserted { continue }
+                if app.isTerminated || app.isHidden { continue }
+
+                let appName = (app.localizedName ?? "").lowercased()
+                let bundleID = (app.bundleIdentifier ?? "").lowercased()
+                if appName.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
+                if isConfiguredBrowser(app) { continue }
+
+                guard let window = preferredVisibleWindow(for: app) else { continue }
+                if let wid = WindowManager.windowID(for: window), wid == targetWindowID { continue }
+                if boolAttribute(window, kAXMinimizedAttribute as CFString) { continue }
+
+                if let current = windowFrame(window), framesClose(current, canonical, tolerance: 0.5) {
+                    continue
+                }
+                setFrame(window, nsFrame: canonical)
+            }
+        }
+    }
+
+    private func runningApplications(for tool: ToolItem) -> [NSRunningApplication] {
+        let workspace = NSWorkspace.shared
+        var apps: [NSRunningApplication] = []
+
+        if let bundleID = tool.bundleIdentifier, !bundleID.isEmpty {
+            apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
+        }
+
+        for bundleID in alternativeBundleIdentifiers(for: tool)
+        where !apps.contains(where: { $0.bundleIdentifier == bundleID }) {
+            apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
+        }
+
+        if apps.isEmpty {
+            let candidates = [tool.appName, tool.name, tool.id]
+                .compactMap { $0?.lowercased() }
+                .filter { !$0.isEmpty }
+            apps.append(contentsOf: workspace.runningApplications.filter { app in
+                guard let name = app.localizedName?.lowercased() else { return false }
+                return candidates.contains(where: { name == $0 || name.contains($0) || $0.contains(name) })
+            })
+        }
+
+        var seen = Set<pid_t>()
+        return apps.filter { seen.insert($0.processIdentifier).inserted }
+    }
+
+    private func alternativeBundleIdentifiers(for tool: ToolItem) -> [String] {
+        switch tool.id.lowercased() {
+        case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+            return ["com.openai.codex", "com.openai.chat"]
+        case "workbuddy":
+            return ["com.tencent.workbuddy.mac"]
+        case "hermes":
+            return ["com.nousresearch.hermes"]
+        case "antigravity":
+            return ["com.google.antigravity", "com.google.antigravity-ide"]
+        case "grok-bot", "grokbot":
+            return ["com.anysphere.sand"]
+        case "wps-lingxi", "wpslingxi", "lingxi":
+            return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
+        default:
+            return []
+        }
+    }
+
+    private func isConfiguredBrowser(_ app: NSRunningApplication) -> Bool {
+        let browser = configStore.configuration.browser
+        if let bundleID = browser.bundleIdentifier, !bundleID.isEmpty,
+           app.bundleIdentifier == bundleID {
+            return true
+        }
+        return app.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
+    }
+
+    private func preferredVisibleWindow(for app: NSRunningApplication) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXWindowsAttribute as CFString,
+            &rawValue
+        ) == .success,
+        let windows = rawValue as? [AXUIElement] else {
+            return nil
+        }
+
+        let candidates = windows.filter { window in
+            let role = stringAttribute(window, kAXRoleAttribute as CFString)
+            guard role == "AXWindow" else { return false }
+
+            let subrole = stringAttribute(window, kAXSubroleAttribute as CFString)
+            if subrole == "AXFloatingWindow" || subrole == "AXSystemDialog" { return false }
+            if boolAttribute(window, kAXMinimizedAttribute as CFString) { return false }
+            guard let frame = windowFrame(window) else { return false }
+            return frame.width >= 100 && frame.height >= 100
+        }
+
+        if let main = candidates.first(where: { boolAttribute($0, kAXMainAttribute as CFString) }) {
+            return main
+        }
+        return candidates.first
     }
 
     private func trackedWindow(in app: NSRunningApplication, windowID: CGWindowID) -> AXUIElement? {
@@ -173,6 +280,22 @@ final class RailAdjacencyCoordinator {
             guard let candidateID = WindowManager.windowID(for: window) else { return false }
             return candidateID == windowID
         }
+    }
+
+    private func rounded(_ frame: CGRect) -> CGRect {
+        CGRect(
+            x: frame.minX.rounded(),
+            y: frame.minY.rounded(),
+            width: frame.width.rounded(),
+            height: frame.height.rounded()
+        )
+    }
+
+    private func framesClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
+        abs(a.minX - b.minX) <= tolerance &&
+        abs(a.minY - b.minY) <= tolerance &&
+        abs(a.width - b.width) <= tolerance &&
+        abs(a.height - b.height) <= tolerance
     }
 
     private func windowFrame(_ window: AXUIElement) -> CGRect? {
@@ -212,12 +335,20 @@ final class RailAdjacencyCoordinator {
         var point = CGPoint(x: nsFrame.minX, y: primaryHeight - nsFrame.maxY)
         var size = CGSize(width: nsFrame.width, height: nsFrame.height)
 
+        // Resize first, then position. This is safer for apps restoring a cached frame
+        // because the final position is the last AX write and therefore wins visually.
         if let sizeValue = AXValueCreate(.cgSize, &size) {
             AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         }
         if let pointValue = AXValueCreate(.cgPoint, &point) {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pointValue)
         }
+    }
+
+    private func stringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+        return value as? String
     }
 
     private func boolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool {
