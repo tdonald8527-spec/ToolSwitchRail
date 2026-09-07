@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var railWindowController: RailWindowController!
     private var hotKeyManager: GlobalHotKeyManager!
     private var dragIsolationCoordinator: DragIsolationCoordinator!
+    private var railAdjacencyCoordinator: RailAdjacencyCoordinator!
     private var cancellables = Set<AnyCancellable>()
 
     private var statusItem: NSStatusItem?
@@ -42,6 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dragIsolationCoordinator = DragIsolationCoordinator(
             configStore: configStore,
             windowManager: windowManager
+        )
+
+        // Enforce the hard seam invariant even when a third-party app re-zooms or
+        // restores itself to the screen's left edge after Tool Switch Rail placed it.
+        railAdjacencyCoordinator = RailAdjacencyCoordinator(
+            configStore: configStore,
+            windowManager: windowManager,
+            railWindowController: railWindowController
         )
 
         NSLog("[ToolSwitchRail] App launched, AXTrusted: %d, railFrame: %@", AccessibilityPermission.isTrusted ? 1 : 0, NSStringFromRect(geometry.rail))
