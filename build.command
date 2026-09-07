@@ -80,6 +80,7 @@ SWIFT_FILES=(
   "$SRC_DIR/Services/ConfigStore.swift"
   "$SRC_DIR/Services/GlobalHotKeyManager.swift"
   "$SRC_DIR/Services/DragIsolationCoordinator.swift"
+  "$SRC_DIR/Services/RailAdjacencyCoordinator.swift"
   "$SRC_DIR/Services/WindowTracker.swift"
   "$SRC_DIR/Services/WindowManager.swift"
   "$SRC_DIR/Services/ToolStatusMonitor.swift"
