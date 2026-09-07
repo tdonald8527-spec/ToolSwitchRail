@@ -70,9 +70,6 @@ final class DragIsolationCoordinator {
             // Isolate from the first real drag event instead of waiting until the
             // canonical frame has already moved by 1pt. The previous one-frame delay
             // was enough to expose a sliver of the warm stack at the old position.
-            // Background apps are fully covered by the active window, so doing this
-            // for in-app drags/text selection is visually harmless and they are
-            // restored immediately on mouse-up.
             if !isolationActive {
                 beginIsolation(stackFrame: start, activePID: activePID)
             }
@@ -139,8 +136,8 @@ final class DragIsolationCoordinator {
 
         let final = rounded(finalFrame)
 
-        // Place while hidden first. This is the important part: when the apps return,
-        // they are already underneath the foreground window at the new canonical slot.
+        // Place while hidden first. When the apps return they should already sit under
+        // the foreground window at the new canonical slot.
         for state in states {
             guard !state.app.isTerminated else { continue }
             for window in state.windows {
@@ -152,14 +149,22 @@ final class DragIsolationCoordinator {
             state.app.unhide()
         }
 
-        // Some Electron apps restore a cached frame as they unhide. Reassert once after
-        // a short settle without putting them through a live 60fps AX loop.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 60_000_000)
-            guard let self, generation == self.restoreGeneration else { return }
-            for state in states where !state.app.isTerminated {
-                for window in state.windows {
-                    self.setFrame(window, nsFrame: final)
+        // Electron apps do not all restore on the same cadence. A single 60ms write
+        // was not enough: some apps restore a cached frame later and expose a strip of
+        // the old window above/beside the foreground member. Reassert at three settle
+        // points without putting siblings back into the live drag hot path.
+        for delay: UInt64 in [60_000_000, 180_000_000, 420_000_000] {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: delay)
+                guard let self, generation == self.restoreGeneration else { return }
+                for state in states where !state.app.isTerminated && !state.app.isHidden {
+                    for window in state.windows {
+                        guard !self.boolAttribute(window, kAXMinimizedAttribute as CFString) else { continue }
+                        if let current = self.windowFrame(window), self.framesClose(current, final, tolerance: 0.5) {
+                            continue
+                        }
+                        self.setFrame(window, nsFrame: final)
+                    }
                 }
             }
         }
