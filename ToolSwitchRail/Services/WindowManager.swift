@@ -477,13 +477,10 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 }
             }
 
-            // Check appName / tool.name / bundleName
+            // Check appName / tool.name / bundleName (exact match first)
             let candidateNames = [tool.appName, tool.name, tool.id].compactMap { $0?.lowercased() }.filter { !$0.isEmpty }
             for candidate in candidateNames {
-                if appName == candidate || appName.contains(candidate) || candidate.contains(appName) {
-                    return tool
-                }
-                if bundleName == candidate || bundleName.contains(candidate) {
+                if appName == candidate || bundleName == candidate {
                     return tool
                 }
             }
@@ -507,7 +504,11 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                     return tool
                 }
             case "grok-bot", "grokbot":
-                if appName.contains("grok") || appBundleID.contains("anysphere") {
+                if appName == "grok bot" || appBundleID == "com.anysphere.sand" || appBundleID.contains("sand") {
+                    return tool
+                }
+            case "grok-web", "grok":
+                if appName == "grok" || appBundleID.contains("e0ef637e") {
                     return tool
                 }
             case "hermes":
@@ -520,7 +521,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
             // Web PWA candidate
             if tool.kind == .web && appBundleID.contains("safari.webapp") {
-                if appName == tool.name.lowercased() || appName.contains(tool.name.lowercased()) {
+                if appName == tool.name.lowercased() {
                     return tool
                 }
             }
@@ -542,6 +543,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return ["com.anysphere.sand"]
         case "wps-lingxi", "wpslingxi", "lingxi":
             return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
+        case "grok-web", "grok":
+            return [null]
+        case "gemini-web", "gemini":
+            return [null]
+        case "chatgpt-web":
+            return [null]
         default:
             return []
         }
@@ -1182,6 +1189,32 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             throw RailError.invalidConfiguration("\(tool.name) 缺少有效的 appName 或 bundleIdentifier")
 
         case .web:
+            // 1. Check if tool has explicit or resolved bundleIdentifier for a standalone Web App / PWA
+            if let bundleID = tool.bundleIdentifier ?? resolvedBundleIdentifier(for: tool),
+               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = false
+                NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
+                    if let error {
+                        print("[WindowManager] Open webapp failed: \(error)")
+                    }
+                }
+                return
+            }
+
+            // 2. Check if a standalone app exists in ~/Applications or /Applications
+            let candidates = [
+                NSString(string: "~/Applications/\(tool.name).app").expandingTildeInPath,
+                NSString(string: "~/Applications/\(tool.appName ?? "").app").expandingTildeInPath,
+                "/Applications/\(tool.name).app"
+            ].filter { !$0.hasSuffix("/.app") }
+
+            for path in candidates where FileManager.default.fileExists(atPath: path) {
+                try runOpen(arguments: ["-g", path])
+                return
+            }
+
+            // 3. Fallback to browser app
             guard let url = tool.url, !url.isEmpty else {
                 throw RailError.invalidConfiguration("\(tool.name) 缺少 url")
             }
@@ -1300,6 +1333,15 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case .web:
             var apps: [NSRunningApplication] = []
 
+            if let explicit = tool.bundleIdentifier ?? resolvedBundleIdentifier(for: tool) {
+                apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: explicit))
+            }
+            for altID in alternativeBundleIdentifiers(for: tool) {
+                if !apps.contains(where: { $0.bundleIdentifier == altID }) {
+                    apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: altID))
+                }
+            }
+
             if let bundleID = configStore.configuration.browser.bundleIdentifier,
                !bundleID.isEmpty {
                 apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
@@ -1316,7 +1358,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 if apps.contains(where: { $0.processIdentifier == app.processIdentifier }) { continue }
                 if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue }
                 if isBrowserApplication(app) { continue }
-                if let native = registeredTool(for: app), native.kind == .app { continue }
+                if let registered = registeredTool(for: app), registered.id != tool.id { continue }
 
                 let name = app.localizedName ?? ""
                 let bundleID = app.bundleIdentifier ?? ""
@@ -1347,6 +1389,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case "antigravity": return "com.google.antigravity"
         case "grok-bot", "grokbot": return "com.anysphere.sand"
         case "wps-lingxi", "wpslingxi", "lingxi": return "com.wps.lingxi"
+        case "grok-web", "grok": return null
+        case "gemini-web", "gemini": return null
+        case "chatgpt-web": return null
         default: return nil
         }
     }
