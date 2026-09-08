@@ -1210,6 +1210,29 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
     private func launchBrowserApp(urlString: String) throws {
         let browser = configStore.configuration.browser
+
+        let isBrowserRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == (browser.bundleIdentifier ?? "com.google.Chrome") ||
+            $0.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
+        }
+
+        if isBrowserRunning {
+            let script = """
+            tell application "\(browser.appName)"
+                set newWin to make new window
+                set URL of active tab of newWin to "\(urlString)"
+                activate
+            end tell
+            """
+            if let appleScript = NSAppleScript(source: script) {
+                var error: NSDictionary?
+                appleScript.executeAndReturnError(&error)
+                if error == nil {
+                    return
+                }
+            }
+        }
+
         try runOpen(arguments: ["-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
     }
 
