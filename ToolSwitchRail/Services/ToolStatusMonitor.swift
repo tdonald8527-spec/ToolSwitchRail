@@ -7,6 +7,7 @@ import SQLite3
 final class ToolStatusMonitor: ObservableObject {
     @Published private(set) var snapshots: [String: ToolStatusSnapshot] = [:]
     @Published private(set) var needsYouItems: [NeedsYouItem] = []
+    @Published private(set) var quotaReports: [AgentQuotaItem] = []
 
     private let configStore: ConfigStore
     private var timer: Timer?
@@ -15,7 +16,7 @@ final class ToolStatusMonitor: ObservableObject {
     init(configStore: ConfigStore) {
         self.configStore = configStore
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -43,10 +44,12 @@ final class ToolStatusMonitor: ObservableObject {
                 next[tool.id] = StatusProbe.readSnapshot(for: tool)
             }
             let items = StatusProbe.needsYouItems(from: next, tools: tools)
+            let reports = StatusProbe.readQuotaReports()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.snapshots = next
                 self.needsYouItems = items
+                self.quotaReports = reports
                 self.isRefreshing = false
             }
         }
@@ -72,6 +75,20 @@ private enum StatusProbe {
                     taskTitle: snap.taskTitle
                 )
             }
+    }
+
+    static func readQuotaReports() -> [AgentQuotaItem] {
+        var reports: [AgentQuotaItem] = []
+        if let hermes = HermesStatusSource.readQuotaItem() {
+            reports.append(hermes)
+        }
+        if let ag = AntigravityStatusSource.readQuotaItem() {
+            reports.append(ag)
+        }
+        if let grok = GrokBotStatusSource.readQuotaItem() {
+            reports.append(grok)
+        }
+        return reports
     }
 
     static func readSnapshot(for tool: ToolItem) -> ToolStatusSnapshot {
@@ -268,6 +285,77 @@ private enum HermesStatusSource {
         }
         return nil
     }
+
+    static func readQuotaItem() -> AgentQuotaItem? {
+        let home = NSHomeDirectory() + "/.hermes"
+        let authPath = home + "/auth.json"
+        let stateDB = home + "/state.db"
+
+        var tierText = "Nous"
+        var spendText = "$0.00"
+        var limitText = ""
+
+        if let authData = try? Data(contentsOf: URL(fileURLWithPath: authPath)),
+           let authJSON = try? JSONSerialization.jsonObject(with: authData) as? [String: Any],
+           let providers = authJSON["providers"] as? [String: Any],
+           let nous = providers["nous"] as? [String: Any],
+           let token = nous["access_token"] as? String,
+           let payload = decodeJWTPayload(token) {
+            if let tier = payload["subscription_tier"] as? Int {
+                tierText = "Tier \(tier)"
+            }
+            if let spend = payload["member_spend_usd"] as? String, let s = Double(spend) {
+                spendText = String(format: "$%.3f", s)
+            }
+            if let tpm = payload["rate_limit_tpm"] as? Int {
+                limitText = " · TPM \(tpm / 1_000_000)M"
+            }
+        }
+
+        var topModels: [String] = []
+        if FileManager.default.fileExists(atPath: stateDB) {
+            let rows = SQLiteRead.query(
+                stateDB,
+                sql: """
+                SELECT model, SUM(input_tokens), SUM(output_tokens), SUM(estimated_cost_usd)
+                FROM session_model_usage
+                GROUP BY model
+                ORDER BY SUM(estimated_cost_usd) DESC, SUM(input_tokens) DESC
+                LIMIT 4
+                """
+            )
+            for r in rows {
+                let m = r[0].components(separatedBy: "/").last ?? r[0]
+                let inTok = Int(r[1]) ?? 0
+                let cost = Double(r[3]) ?? 0
+                let inFormatted = inTok > 1_000_000 ? String(format: "%.1fM", Double(inTok) / 1_000_000.0) : "\(inTok / 1000)k"
+                if cost > 0.001 {
+                    topModels.append("\(m): \(inFormatted) tok · $\(String(format: "%.2f", cost))")
+                } else if inTok > 0 {
+                    topModels.append("\(m): \(inFormatted) tok (free)")
+                }
+            }
+        }
+
+        return AgentQuotaItem(
+            id: "hermes",
+            title: "Hermes Agent",
+            detail: "\(tierText) · 已用 \(spendText)\(limitText)",
+            subDetails: topModels
+        )
+    }
+
+    private static func decodeJWTPayload(_ jwt: String) -> [String: Any]? {
+        let parts = jwt.components(separatedBy: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = parts[1]
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padLength = (4 - (base64.count % 4)) % 4
+        base64.append(String(repeating: "=", count: padLength))
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
 }
 
 // MARK: - Antigravity
@@ -356,5 +444,49 @@ private enum AntigravityStatusSource {
         guard let end = rest.firstIndex(of: "\"") else { return nil }
         let title = String(rest[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? nil : title
+    }
+
+    static func readQuotaItem() -> AgentQuotaItem? {
+        let root = NSHomeDirectory() + "/.gemini/antigravity"
+        let convDir = root + "/conversations"
+        let annDir = root + "/annotations"
+        guard FileManager.default.fileExists(atPath: convDir) else { return nil }
+
+        let latest = latestConversation(in: convDir)
+        let fm = FileManager.default
+        let count = (try? fm.contentsOfDirectory(atPath: convDir).filter { $0.hasSuffix(".db") && !$0.contains("-wal") }.count) ?? 0
+
+        var sub: [String] = []
+        if let latest, let title = conversationTitle(id: latest.id, annotationsDir: annDir) {
+            sub.append("最近会话: \(title)")
+        }
+
+        return AgentQuotaItem(
+            id: "antigravity",
+            title: "Antigravity",
+            detail: "DeepMind Agent · \(count) 个任务会话",
+            subDetails: sub
+        )
+    }
+}
+
+// MARK: - Grok Bot
+
+private enum GrokBotStatusSource {
+    static func readQuotaItem() -> AgentQuotaItem? {
+        let statusFile = NSHomeDirectory() + "/Library/Application Support/Grok Bot/desktop-status.json"
+        guard FileManager.default.fileExists(atPath: statusFile),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: statusFile)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let signedIn = json["signedIn"] as? Bool ?? false
+        let version = json["appVersion"] as? String ?? ""
+        return AgentQuotaItem(
+            id: "grok-bot",
+            title: "Grok Bot",
+            detail: signedIn ? "xAI 桌面助手 · 已登录 (v\(version))" : "xAI 桌面助手 (v\(version))",
+            subDetails: ["就绪在线"]
+        )
     }
 }

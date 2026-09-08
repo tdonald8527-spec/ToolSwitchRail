@@ -11,6 +11,8 @@ struct ToolIconView: View {
     var status: AgentTaskStatus = .unknown
     var usageText: String? = nil
     var namespace: Namespace.ID? = nil
+    var onRemove: (() -> Void)? = nil
+    var onActivate: (() -> Void)? = nil
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -90,6 +92,19 @@ struct ToolIconView: View {
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .contentShape(Rectangle())
         .help(tooltipText)
+        .contextMenu {
+            Button {
+                onActivate?()
+            } label: {
+                Label("切换至 \(tool.name)", systemImage: "arrow.up.forward.app")
+            }
+            Divider()
+            Button(role: .destructive) {
+                onRemove?()
+            } label: {
+                Label("从 Rail 移除", systemImage: "trash")
+            }
+        }
     }
 
     private var tooltipText: String {

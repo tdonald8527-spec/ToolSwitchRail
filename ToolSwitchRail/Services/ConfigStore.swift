@@ -67,6 +67,89 @@ final class ConfigStore: ObservableObject {
         save()
     }
 
+    func removeTool(id: String) {
+        var updated = configuration.tools
+        guard let index = updated.firstIndex(where: { $0.id == id }) else { return }
+        updated.remove(at: index)
+
+        // Reassign hotkeyIndex 1...N for enabled tools
+        var counter = 1
+        for i in 0..<updated.count {
+            if updated[i].enabled {
+                updated[i].hotkeyIndex = (counter <= 9) ? counter : nil
+                counter += 1
+            } else {
+                updated[i].hotkeyIndex = nil
+            }
+        }
+
+        configuration.tools = updated
+        save()
+    }
+
+    @discardableResult
+    func addTool(fromAppURL url: URL) -> ToolItem? {
+        let bundle = Bundle(url: url)
+        let info = bundle?.infoDictionary
+        let rawName = info?["CFBundleDisplayName"] as? String
+            ?? info?["CFBundleName"] as? String
+            ?? url.deletingPathExtension().lastPathComponent
+        let cleanName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else { return nil }
+
+        let bundleID = bundle?.bundleIdentifier
+            ?? info?["CFBundleIdentifier"] as? String
+
+        // Check icon
+        var iconPath: String? = nil
+        if let iconFile = info?["CFBundleIconFile"] as? String {
+            let iconName = iconFile.hasSuffix(".icns") ? iconFile : iconFile + ".icns"
+            let direct = url.appendingPathComponent("Contents/Resources/\(iconName)").path
+            if FileManager.default.fileExists(atPath: direct) {
+                iconPath = direct
+            }
+        }
+
+        let baseID = (bundleID?.components(separatedBy: ".").last ?? cleanName)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        var uniqueID = baseID
+        var suffix = 1
+        while configuration.tools.contains(where: { $0.id == uniqueID }) {
+            uniqueID = "\(baseID)-\(suffix)"
+            suffix += 1
+        }
+
+        let nextHotkey = (configuration.tools.filter(\.enabled).count < 9)
+            ? configuration.tools.filter(\.enabled).count + 1
+            : nil
+
+        let newTool = ToolItem(
+            id: uniqueID,
+            name: cleanName,
+            kind: .app,
+            appName: cleanName,
+            bundleIdentifier: bundleID,
+            url: nil,
+            titleContains: [cleanName],
+            symbolName: "app.fill",
+            iconPath: iconPath,
+            hotkeyIndex: nextHotkey,
+            enabled: true,
+            theme: "dark",
+            backgroundColor: "#1e1e1e"
+        )
+
+        configuration.tools.append(newTool)
+        save()
+        return newTool
+    }
+
+    func setAppearance(_ mode: AppearanceMode) {
+        configuration.workspace.appearance = mode
+        save()
+    }
+
     func save() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

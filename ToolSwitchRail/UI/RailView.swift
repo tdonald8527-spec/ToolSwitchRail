@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct RailView: View {
     @ObservedObject var configStore: ConfigStore
@@ -49,13 +50,6 @@ struct RailView: View {
                 RailHeaderDragArea(windowManager: windowManager)
                     .padding(.top, 8)
 
-                NeedsYouButton(
-                    statusMonitor: statusMonitor,
-                    windowManager: windowManager,
-                    tools: tools,
-                    onOpen: onSelect
-                )
-
                 ForEach(Array(tools.enumerated()), id: \.element.id) { index, tool in
                     let isBeingDragged = reorderManager.draggedToolID == tool.id
                     let itemOffset = reorderManager.visualOffset(for: tool.id, at: index)
@@ -69,7 +63,15 @@ struct RailView: View {
                         isOpen: windowManager.openToolIDs.contains(tool.id),
                         status: statusMonitor.snapshot(for: tool.id).status,
                         usageText: statusMonitor.snapshot(for: tool.id).usageText,
-                        namespace: railNamespace
+                        namespace: railNamespace,
+                        onRemove: {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                configStore.removeTool(id: tool.id)
+                            }
+                        },
+                        onActivate: {
+                            onSelect(tool)
+                        }
                     )
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -133,28 +135,40 @@ struct RailView: View {
                     .opacity(0.4)
 
                 Button {
-                    configStore.openConfigFile()
+                    selectAndAddApp()
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 15, weight: .regular))
-                        .foregroundColor(.primary.opacity(0.7))
-                        .frame(width: 40, height: 36)
+                        .foregroundColor(.primary.opacity(0.75))
+                        .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("添加工具：编辑 config.json")
+                .help("添加应用 (.app)")
+
+                Button {
+                    toggleAppearance()
+                } label: {
+                    Image(systemName: appearanceIcon)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.primary.opacity(0.75))
+                        .frame(width: 40, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(appearanceHelpText)
 
                 Button {
                     windowManager.showSettingsMenu()
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundColor(.primary.opacity(0.7))
-                        .frame(width: 40, height: 36)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundColor(.primary.opacity(0.75))
+                        .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("设置")
+                .help("设置与配置文件")
 
                 Spacer().frame(height: 10)
                     .contentShape(Rectangle())
@@ -186,6 +200,52 @@ struct RailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var appearanceIcon: String {
+        switch configStore.configuration.workspace.appearance {
+        case .dark: return "moon.stars.fill"
+        case .light: return "sun.max.fill"
+        case .system: return "circle.lefthalf.filled"
+        }
+    }
+
+    private var appearanceHelpText: String {
+        switch configStore.configuration.workspace.appearance {
+        case .dark: return "当前外观：深色（点击切换至浅色）"
+        case .light: return "当前外观：浅色（点击切换至跟随应用）"
+        case .system: return "当前外观：跟随应用（点击切换至深色）"
+        }
+    }
+
+    private func toggleAppearance() {
+        let next: AppearanceMode
+        switch configStore.configuration.workspace.appearance {
+        case .dark: next = .light
+        case .light: next = .system
+        case .system: next = .dark
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            configStore.setAppearance(next)
+        }
+    }
+
+    private func selectAndAddApp() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "添加至 Rail"
+        panel.message = "请选择要添加到 Tool Switch Rail 的应用程序 (.app)"
+        if panel.runModal() == .OK, let url = panel.url {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                if let tool = configStore.addTool(fromAppURL: url) {
+                    windowManager.switchTo(tool)
+                }
+            }
+        }
     }
 }
 

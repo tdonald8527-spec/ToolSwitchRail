@@ -70,3 +70,10 @@ struct NeedsYouItem: Identifiable, Equatable {
     var status: AgentTaskStatus
     var taskTitle: String?
 }
+
+struct AgentQuotaItem: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var detail: String
+    var subDetails: [String] = []
+}
