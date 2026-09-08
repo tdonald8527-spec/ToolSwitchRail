@@ -543,8 +543,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return ["com.anysphere.sand"]
         case "wps-lingxi", "wpslingxi", "lingxi":
             return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
-        case "grok-web", "grok":
-            return [null]
         case "gemini-web", "gemini":
             return [null]
         case "chatgpt-web":
@@ -1189,8 +1187,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             throw RailError.invalidConfiguration("\(tool.name) 缺少有效的 appName 或 bundleIdentifier")
 
         case .web:
-            // 1. Check if tool has explicit or resolved bundleIdentifier for a standalone Web App / PWA
-            if let bundleID = tool.bundleIdentifier ?? resolvedBundleIdentifier(for: tool),
+            // 1. Check if tool has explicit bundleIdentifier for a standalone Web App / PWA
+            if let bundleID = tool.bundleIdentifier, !bundleID.isEmpty,
                let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = false
@@ -1202,19 +1200,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 return
             }
 
-            // 2. Check if a standalone app exists in ~/Applications or /Applications
-            let candidates = [
-                NSString(string: "~/Applications/\(tool.name).app").expandingTildeInPath,
-                NSString(string: "~/Applications/\(tool.appName ?? "").app").expandingTildeInPath,
-                "/Applications/\(tool.name).app"
-            ].filter { !$0.hasSuffix("/.app") }
-
-            for path in candidates where FileManager.default.fileExists(atPath: path) {
-                try runOpen(arguments: ["-g", path])
-                return
-            }
-
-            // 3. Fallback to browser app
+            // 2. Launch via configured browser with standalone app window
             guard let url = tool.url, !url.isEmpty else {
                 throw RailError.invalidConfiguration("\(tool.name) 缺少 url")
             }
@@ -1224,30 +1210,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
     private func launchBrowserApp(urlString: String) throws {
         let browser = configStore.configuration.browser
-        var applicationURL: URL?
-
-        if let bundleID = browser.bundleIdentifier, !bundleID.isEmpty {
-            applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
-        }
-
-        if applicationURL == nil {
-            let candidate = URL(fileURLWithPath: "/Applications/\(browser.appName).app")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                applicationURL = candidate
-            }
-        }
-
-        if let applicationURL,
-           let bundle = Bundle(url: applicationURL),
-           let executableURL = bundle.executableURL {
-            let process = Process()
-            process.executableURL = executableURL
-            process.arguments = ["--app=\(urlString)", "--new-window"]
-            try process.run()
-            return
-        }
-
-        try runOpen(arguments: ["-g", "-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
+        try runOpen(arguments: ["-a", browser.appName, "--args", "--app=\(urlString)", "--new-window"])
     }
 
     private func runOpen(arguments: [String]) throws {
@@ -1389,7 +1352,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case "antigravity": return "com.google.antigravity"
         case "grok-bot", "grokbot": return "com.anysphere.sand"
         case "wps-lingxi", "wpslingxi", "lingxi": return "com.wps.lingxi"
-        case "grok-web", "grok": return null
         case "gemini-web", "gemini": return null
         case "chatgpt-web": return null
         default: return nil
