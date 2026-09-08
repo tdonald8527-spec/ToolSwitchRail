@@ -108,7 +108,7 @@
       "id": "grok-web",
       "name": "Grok",
       "kind": "web",
-      "appName": null,
+      "appName": "Grok",
       "bundleIdentifier": null,
       "url": "https://grok.com",
       "titleContains": ["Grok", "grok.com", "xAI"],

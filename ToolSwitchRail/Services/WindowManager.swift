@@ -437,11 +437,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     }
 
     private func isBrowserApplication(_ app: NSRunningApplication) -> Bool {
-        let browser = configStore.configuration.browser
-        if let bID = browser.bundleIdentifier, !bID.isEmpty, app.bundleIdentifier == bID {
-            return true
-        }
-        return app.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
+        // Chrome and other general browsers must NEVER be managed or attached to the rail.
+        // Managed web tools run as dedicated standalone Web Apps (PWAs).
+        return false
     }
 
     private func hasZeroVisibleWindows(_ app: NSRunningApplication) -> Bool {
@@ -543,6 +541,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return ["com.anysphere.sand"]
         case "wps-lingxi", "wpslingxi", "lingxi":
             return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
+        case "grok-web", "grok":
+            return [null]
         case "gemini-web", "gemini":
             return [null]
         case "chatgpt-web":
@@ -1187,8 +1187,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             throw RailError.invalidConfiguration("\(tool.name) 缺少有效的 appName 或 bundleIdentifier")
 
         case .web:
-            // 1. Check if tool has explicit bundleIdentifier for a standalone Web App / PWA
-            if let bundleID = tool.bundleIdentifier, !bundleID.isEmpty,
+            // 1. Check if tool has explicit or resolved bundleIdentifier for a standalone Web App / PWA
+            if let bundleID = tool.bundleIdentifier ?? resolvedBundleIdentifier(for: tool),
                let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = false
@@ -1200,11 +1200,23 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 return
             }
 
-            // 2. Launch via configured browser with standalone app window
-            guard let url = tool.url, !url.isEmpty else {
+            // 2. Check if a standalone app exists in ~/Applications or /Applications
+            let candidates = [
+                NSString(string: "~/Applications/\(tool.name).app").expandingTildeInPath,
+                NSString(string: "~/Applications/\(tool.appName ?? "").app").expandingTildeInPath,
+                "/Applications/\(tool.name).app"
+            ].filter { !$0.hasSuffix("/.app") }
+
+            for path in candidates where FileManager.default.fileExists(atPath: path) {
+                try runOpen(arguments: ["-g", path])
+                return
+            }
+
+            // 3. Fallback to normal system URL open without managing browser
+            guard let url = tool.url, !url.isEmpty, let targetURL = URL(string: url) else {
                 throw RailError.invalidConfiguration("\(tool.name) 缺少 url")
             }
-            try launchBrowserApp(urlString: url)
+            NSWorkspace.shared.open(targetURL)
         }
     }
 
@@ -1375,6 +1387,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case "antigravity": return "com.google.antigravity"
         case "grok-bot", "grokbot": return "com.anysphere.sand"
         case "wps-lingxi", "wpslingxi", "lingxi": return "com.wps.lingxi"
+        case "grok-web", "grok": return null
         case "gemini-web", "gemini": return null
         case "chatgpt-web": return null
         default: return nil
