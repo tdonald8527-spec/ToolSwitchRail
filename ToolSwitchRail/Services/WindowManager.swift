@@ -541,12 +541,11 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return ["com.anysphere.sand"]
         case "wps-lingxi", "wpslingxi", "lingxi":
             return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
-        case "grok-web", "grok":
-            return [null]
-        case "gemini-web", "gemini":
-            return [null]
-        case "chatgpt-web":
-            return [null]
+        case "grok-web", "grok", "gemini-web", "gemini", "chatgpt-web":
+            if let explicit = tool.bundleIdentifier, !explicit.isEmpty {
+                return [explicit]
+            }
+            return []
         default:
             return []
         }
@@ -1200,8 +1199,10 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 return
             }
 
-            // 2. Check if a standalone app exists in ~/Applications or /Applications
+            // 2. Check if a standalone app exists in ~/Applications/Chrome Apps.localized, ~/Applications or /Applications
             let candidates = [
+                NSString(string: "~/Applications/Chrome Apps.localized/\(tool.name).app").expandingTildeInPath,
+                NSString(string: "~/Applications/Chrome Apps.localized/\(tool.appName ?? "").app").expandingTildeInPath,
                 NSString(string: "~/Applications/\(tool.name).app").expandingTildeInPath,
                 NSString(string: "~/Applications/\(tool.appName ?? "").app").expandingTildeInPath,
                 "/Applications/\(tool.name).app"
@@ -1387,9 +1388,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case "antigravity": return "com.google.antigravity"
         case "grok-bot", "grokbot": return "com.anysphere.sand"
         case "wps-lingxi", "wpslingxi", "lingxi": return "com.wps.lingxi"
-        case "grok-web", "grok": return null
-        case "gemini-web", "gemini": return null
-        case "chatgpt-web": return null
+        case "grok-web", "grok", "gemini-web", "gemini", "chatgpt-web":
+            return tool.bundleIdentifier
         default: return nil
         }
     }
@@ -1477,7 +1477,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 return matching
             }
 
-            if validWindows.count == 1 && app.bundleIdentifier != configStore.configuration.browser.bundleIdentifier {
+            if !validWindows.isEmpty && app.bundleIdentifier != configStore.configuration.browser.bundleIdentifier {
                 return validWindows
             }
             return []
