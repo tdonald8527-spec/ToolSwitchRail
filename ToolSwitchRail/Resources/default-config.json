@@ -61,6 +61,8 @@
       "url": null,
       "titleContains": ["WorkBuddy"],
       "symbolName": "w.circle",
+      "theme": "dark",
+      "backgroundColor": "#1F1F1F",
       "iconPath": null,
       "hotkeyIndex": 4,
       "enabled": true

@@ -54,7 +54,7 @@ struct ToolItem: Codable, Identifiable, Hashable {
         }
         switch id.lowercased() {
         case "workbuddy":
-            return .light
+            return .dark
         case "wps-lingxi", "wpslingxi", "lingxi":
             return .dark
         default:
@@ -68,9 +68,9 @@ struct ToolItem: Codable, Identifiable, Hashable {
         }
         switch id.lowercased() {
         case "workbuddy":
-            return "#F2F2F2"
+            return "#1F1F1F"
         case "wps-lingxi", "wpslingxi", "lingxi":
-            return "#FFFFFF"
+            return "#121212"
         case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
             return "#212121"
         case "antigravity":
