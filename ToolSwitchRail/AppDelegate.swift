@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         pop.contentViewController = NSHostingController(rootView: dashboard)
+        pop.contentSize = NSSize(width: 320, height: 400)
         self.popover = pop
     }
 

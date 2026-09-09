@@ -88,18 +88,71 @@ private enum StatusProbe {
         if let grok = GrokBotStatusSource.readQuotaItem() {
             reports.append(grok)
         }
+        if let wb = WorkBuddyStatusSource.readQuotaItem() {
+            reports.append(wb)
+        }
+        if let gpt = ChatGPTStatusSource.readQuotaItem() {
+            reports.append(gpt)
+        }
         return reports
     }
 
     static func readSnapshot(for tool: ToolItem) -> ToolStatusSnapshot {
         let key = tool.id.lowercased()
         let bundle = (tool.bundleIdentifier ?? "").lowercased()
+
         if key == "hermes" || bundle == "com.nousresearch.hermes" {
-            return HermesStatusSource.read(toolID: tool.id) ?? .unknown(toolID: tool.id)
+            if let snap = HermesStatusSource.read(toolID: tool.id) {
+                return snap
+            }
         }
         if key == "antigravity" || bundle == "com.google.antigravity" {
-            return AntigravityStatusSource.read(toolID: tool.id) ?? .unknown(toolID: tool.id)
+            if let snap = AntigravityStatusSource.read(toolID: tool.id) {
+                return snap
+            }
         }
+        if key == "grok-bot" || key == "grok" || bundle == "com.anysphere.sand" {
+            if let snap = GrokBotStatusSource.read(toolID: tool.id) {
+                return snap
+            }
+        }
+        if key == "workbuddy" || key == "work-buddy" || bundle == "com.tencent.workbuddy.mac" {
+            if let snap = WorkBuddyStatusSource.read(toolID: tool.id) {
+                return snap
+            }
+        }
+        if key == "codex" || key == "chatgpt" || bundle == "com.openai.codex" || bundle == "com.openai.chat" {
+            if let snap = ChatGPTStatusSource.read(toolID: tool.id) {
+                return snap
+            }
+        }
+
+        // Generic fallback: If the tool app is running in macOS, report .idle rather than .unknown
+        if let bundleID = tool.bundleIdentifier,
+           !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
+            return ToolStatusSnapshot(
+                toolID: tool.id,
+                status: .idle,
+                taskTitle: nil,
+                usageText: nil,
+                sourceReliable: true
+            )
+        }
+        if let appName = tool.appName {
+            let isRunning = NSWorkspace.shared.runningApplications.contains { app in
+                app.localizedName?.lowercased() == appName.lowercased()
+            }
+            if isRunning {
+                return ToolStatusSnapshot(
+                    toolID: tool.id,
+                    status: .idle,
+                    taskTitle: nil,
+                    usageText: nil,
+                    sourceReliable: true
+                )
+            }
+        }
+
         return .unknown(toolID: tool.id)
     }
 }
@@ -470,9 +523,137 @@ private enum AntigravityStatusSource {
     }
 }
 
+// MARK: - Base32 Helper
+
+private enum Base32 {
+    static func decodeToString(_ string: String) -> String? {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        let clean = string.uppercased().replacingOccurrences(of: "=", with: "")
+        var bits = 0
+        var bitCount = 0
+        var bytes = [UInt8]()
+        for char in clean {
+            guard let val = alphabet.firstIndex(of: char) else { continue }
+            bits = (bits << 5) | val
+            bitCount += 5
+            if bitCount >= 8 {
+                bitCount -= 8
+                bytes.append(UInt8((bits >> bitCount) & 0xFF))
+            }
+        }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+}
+
 // MARK: - Grok Bot
 
 private enum GrokBotStatusSource {
+    static func read(toolID: String) -> ToolStatusSnapshot? {
+        let grokDir = NSHomeDirectory() + "/Library/Application Support/Grok Bot"
+        let markerPath = grokDir + "/sand-session-marker.json"
+        let isRunningApp = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.anysphere.sand").isEmpty
+
+        guard isRunningApp || FileManager.default.fileExists(atPath: markerPath) else {
+            return nil
+        }
+
+        var isAlive = isRunningApp
+        if let markerData = try? Data(contentsOf: URL(fileURLWithPath: markerPath)),
+           let markerJSON = try? JSONSerialization.jsonObject(with: markerData) as? [String: Any] {
+            if let aliveAt = markerJSON["aliveAtMs"] as? Double {
+                let nowMs = Date().timeIntervalSince1970 * 1000
+                if (nowMs - aliveAt) < 45000 {
+                    isAlive = true
+                }
+            }
+            if !isAlive, let pid = markerJSON["pid"] as? pid_t, pid > 0 {
+                if kill(pid, 0) == 0 {
+                    isAlive = true
+                }
+            }
+        }
+
+        guard isAlive else {
+            return ToolStatusSnapshot(toolID: toolID, status: .idle, taskTitle: nil, usageText: nil, sourceReliable: false)
+        }
+
+        let persistDir = grokDir + "/sand-client-persistence"
+        let fm = FileManager.default
+        var lastAgentID: String?
+        var agentName: String?
+        var isStreaming = false
+        var isSending = false
+
+        if let files = try? fm.contentsOfDirectory(atPath: persistDir) {
+            var decodedMap: [(file: String, key: String)] = []
+            for f in files where f.hasSuffix(".blob") {
+                let raw = String(f.dropLast(5))
+                if let key = Base32.decodeToString(raw) {
+                    decodedMap.append((f, key))
+                }
+            }
+
+            for item in decodedMap where item.key.contains("last-agent") {
+                let path = persistDir + "/" + item.file
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let val = json["value"] as? [String: Any],
+                   let aid = val["agentId"] as? String {
+                    lastAgentID = aid
+                    break
+                }
+            }
+
+            if let aid = lastAgentID {
+                for item in decodedMap where item.key.contains("last-roster") {
+                    let path = persistDir + "/" + item.file
+                    if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let val = json["value"] as? [String: Any],
+                       let rows = val["rows"] as? [[String: Any]] {
+                        for r in rows where (r["id"] as? String) == aid {
+                            agentName = r["name"] as? String
+                            break
+                        }
+                    }
+                    break
+                }
+
+                for item in decodedMap where item.key.contains("transcript.replicas." + aid) {
+                    let path = persistDir + "/" + item.file
+                    if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let val = json["value"] as? [String: Any],
+                       let entries = val["entries"] as? [[String: Any]],
+                       let last = entries.last {
+                        isStreaming = (last["isStreaming"] as? Bool) ?? false
+                    }
+                    break
+                }
+            }
+
+            for item in decodedMap where item.key.contains("send-journal") {
+                let path = persistDir + "/" + item.file
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let val = json["value"] as? [String: Any],
+                   let records = val["records"] as? [Any] {
+                    isSending = !records.isEmpty
+                }
+                break
+            }
+        }
+
+        let status: AgentTaskStatus = (isStreaming || isSending) ? .working : .idle
+        return ToolStatusSnapshot(
+            toolID: toolID,
+            status: status,
+            taskTitle: agentName,
+            usageText: nil,
+            sourceReliable: true
+        )
+    }
+
     static func readQuotaItem() -> AgentQuotaItem? {
         let statusFile = NSHomeDirectory() + "/Library/Application Support/Grok Bot/desktop-status.json"
         guard FileManager.default.fileExists(atPath: statusFile),
@@ -482,11 +663,270 @@ private enum GrokBotStatusSource {
         }
         let signedIn = json["signedIn"] as? Bool ?? false
         let version = json["appVersion"] as? String ?? ""
+        var sub: [String] = []
+        if let snap = read(toolID: "grok-bot"), let title = snap.taskTitle {
+            sub.append("当前助手: \(title)")
+        } else {
+            sub.append("就绪在线")
+        }
         return AgentQuotaItem(
             id: "grok-bot",
             title: "Grok Bot",
             detail: signedIn ? "xAI 桌面助手 · 已登录 (v\(version))" : "xAI 桌面助手 (v\(version))",
-            subDetails: ["就绪在线"]
+            subDetails: sub
+        )
+    }
+}
+
+// MARK: - WorkBuddy
+
+private enum WorkBuddyStatusSource {
+    static func read(toolID: String) -> ToolStatusSnapshot? {
+        let isRunningApp = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.tencent.workbuddy.mac").isEmpty
+        let wbDir = NSHomeDirectory() + "/.workbuddy"
+        let sessDir = wbDir + "/sessions"
+        let fm = FileManager.default
+
+        guard isRunningApp || fm.fileExists(atPath: wbDir) else {
+            return nil
+        }
+
+        var isAlive = isRunningApp
+        let nowMs = Date().timeIntervalSince1970 * 1000
+
+        if let files = try? fm.contentsOfDirectory(atPath: sessDir) {
+            for f in files where f.hasSuffix(".json") {
+                let path = sessDir + "/" + f
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let hb = json["lastHeartbeat"] as? Double,
+                   (nowMs - hb) < 45000 {
+                    isAlive = true
+                    break
+                }
+            }
+        }
+
+        guard isAlive else {
+            return ToolStatusSnapshot(toolID: toolID, status: .idle, taskTitle: nil, usageText: nil, sourceReliable: false)
+        }
+
+        var isWorking = false
+        var needsApproval = false
+        var taskTitle: String?
+
+        // 1. Check latest artifact-index for latest task/file title
+        let artDir = wbDir + "/artifact-index"
+        if let artFiles = try? fm.contentsOfDirectory(atPath: artDir) {
+            var bestDate: Date = .distantPast
+            var bestPath: String?
+            for f in artFiles where f.hasSuffix(".json") {
+                let p = artDir + "/" + f
+                if let attrs = try? fm.attributesOfItem(atPath: p),
+                   let mod = attrs[.modificationDate] as? Date,
+                   mod > bestDate {
+                    bestDate = mod
+                    bestPath = p
+                }
+            }
+            if let bestPath,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: bestPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let arts = json["artifacts"] as? [[String: Any]],
+               let first = arts.first,
+               let name = first["name"] as? String {
+                taskTitle = name
+            }
+        }
+
+        // 2. Check today's logs for activity
+        let todayFormatter = DateFormatter()
+        todayFormatter.dateFormat = "yyyy-MM-dd"
+        let todayStr = todayFormatter.string(from: Date())
+        let todayLogDir = wbDir + "/logs/" + todayStr
+
+        if let logFiles = try? fm.contentsOfDirectory(atPath: todayLogDir) {
+            let nowSec = Date().timeIntervalSince1970
+            for f in logFiles where f.hasSuffix(".log") {
+                let path = todayLogDir + "/" + f
+                guard let attrs = try? fm.attributesOfItem(atPath: path),
+                      let mod = attrs[.modificationDate] as? Date else { continue }
+                let modSec = mod.timeIntervalSince1970
+
+                // If log was touched in last 3.5 seconds
+                if (nowSec - modSec) < 3.5 {
+                    if f.contains("sdk") || f.contains("conversations") || f.contains("workbuddyMainThread") {
+                        isWorking = true
+                    }
+                }
+
+                // Check tail of workspace log for runId or needsApproval
+                if f.contains("__") {
+                    if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) {
+                        let size = handle.seekToEndOfFile()
+                        let readLen = min(size, 4096)
+                        handle.seek(toFileOffset: size - readLen)
+                        let data = handle.readDataToEndOfFile()
+                        if let text = String(data: data, encoding: .utf8) {
+                            if text.contains("runId=") && !text.contains("runId=(none)") {
+                                isWorking = true
+                            }
+                            if text.contains("needsApproval") || text.contains("requireApproval") {
+                                needsApproval = true
+                            }
+                        }
+                        try? handle.close()
+                    }
+                }
+            }
+        }
+
+        let status: AgentTaskStatus
+        if needsApproval {
+            status = .needsApproval
+        } else if isWorking {
+            status = .working
+        } else {
+            status = .idle
+        }
+
+        return ToolStatusSnapshot(
+            toolID: toolID,
+            status: status,
+            taskTitle: taskTitle,
+            usageText: nil,
+            sourceReliable: true
+        )
+    }
+
+    static func readQuotaItem() -> AgentQuotaItem? {
+        let wbDir = NSHomeDirectory() + "/.workbuddy"
+        let sessDir = wbDir + "/sessions"
+        let fm = FileManager.default
+        var version = "2.132.0"
+
+        if let files = try? fm.contentsOfDirectory(atPath: sessDir) {
+            for f in files where f.hasSuffix(".json") {
+                let path = sessDir + "/" + f
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let v = json["version"] as? String {
+                    version = v
+                    break
+                }
+            }
+        }
+
+        var sub: [String] = []
+        if let snap = read(toolID: "workbuddy"), let title = snap.taskTitle {
+            sub.append("最近产出: \(title)")
+        } else {
+            sub.append("就绪在线")
+        }
+
+        return AgentQuotaItem(
+            id: "workbuddy",
+            title: "WorkBuddy",
+            detail: "腾讯云开发智能助手 · v\(version)",
+            subDetails: sub
+        )
+    }
+}
+
+// MARK: - ChatGPT / Codex
+
+private enum ChatGPTStatusSource {
+    static func read(toolID: String) -> ToolStatusSnapshot? {
+        let isRunningApp = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
+            || !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.chat").isEmpty
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy/MM/dd"
+        let today = formatter.string(from: Date())
+        let logDir = NSHomeDirectory() + "/Library/Logs/com.openai.codex/" + today
+        let fm = FileManager.default
+
+        guard isRunningApp || fm.fileExists(atPath: logDir) else {
+            return nil
+        }
+
+        guard isRunningApp else {
+            return ToolStatusSnapshot(toolID: toolID, status: .idle, taskTitle: nil, usageText: nil, sourceReliable: false)
+        }
+
+        var isWorking = false
+        var taskTitle: String?
+
+        if let files = try? fm.contentsOfDirectory(atPath: logDir) {
+            var bestDate: Date = .distantPast
+            var bestFile: String?
+            for f in files where f.hasSuffix(".log") {
+                let path = logDir + "/" + f
+                if let attrs = try? fm.attributesOfItem(atPath: path),
+                   let mod = attrs[.modificationDate] as? Date,
+                   mod > bestDate {
+                    bestDate = mod
+                    bestFile = path
+                }
+            }
+
+            if let bestFile, let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: bestFile)) {
+                let size = handle.seekToEndOfFile()
+                let readLen = min(size, 8192)
+                handle.seek(toFileOffset: size - readLen)
+                let data = handle.readDataToEndOfFile()
+                if let text = String(data: data, encoding: .utf8) {
+                    let lines = text.components(separatedBy: "\n")
+                    var lastStarted = -1
+                    var lastCompleted = -1
+                    for (i, line) in lines.enumerated() {
+                        if line.contains("chatgpt_conversation_refetch_started") {
+                            lastStarted = i
+                        } else if line.contains("chatgpt_conversation_refetch_completed") {
+                            lastCompleted = i
+                        }
+                        if line.contains("conversationId=") {
+                            for part in line.components(separatedBy: " ") {
+                                if part.hasPrefix("conversationId=") {
+                                    let cid = String(part.dropFirst("conversationId=".count))
+                                    if cid != "null" && !cid.isEmpty {
+                                        taskTitle = "会话 " + String(cid.prefix(8))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let timeSinceMod = Date().timeIntervalSince(bestDate)
+                    if lastStarted > lastCompleted && timeSinceMod < 12 {
+                        isWorking = true
+                    }
+                }
+                try? handle.close()
+            }
+        }
+
+        let status: AgentTaskStatus = isWorking ? .working : .idle
+        return ToolStatusSnapshot(
+            toolID: toolID,
+            status: status,
+            taskTitle: taskTitle,
+            usageText: nil,
+            sourceReliable: true
+        )
+    }
+
+    static func readQuotaItem() -> AgentQuotaItem? {
+        var sub: [String] = []
+        if let snap = read(toolID: "codex"), let title = snap.taskTitle {
+            sub.append("最近: \(title)")
+        } else {
+            sub.append("就绪在线")
+        }
+        return AgentQuotaItem(
+            id: "codex",
+            title: "ChatGPT (Mac)",
+            detail: "OpenAI 桌面助手 · Codex",
+            subDetails: sub
         )
     }
 }

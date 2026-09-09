@@ -190,7 +190,7 @@ struct StatusBarDashboardView: View {
                                         Spacer(minLength: 0)
 
                                         Circle()
-                                            .fill(snap.status.needsYou ? Color.orange : (isOpen ? Color.green : Color.secondary.opacity(0.35)))
+                                            .fill(snap.status.needsYou ? Color.orange : (snap.status == .working ? Color(red: 0.20, green: 0.72, blue: 0.45) : (isOpen ? Color.green : Color.secondary.opacity(0.35))))
                                             .frame(width: 6, height: 6)
                                     }
 
@@ -199,12 +199,16 @@ struct StatusBarDashboardView: View {
                                             Text("需确认")
                                                 .font(.system(size: 9.5, weight: .medium))
                                                 .foregroundColor(.orange)
+                                        } else if snap.status == .working {
+                                            Text("工作中")
+                                                .font(.system(size: 9.5, weight: .medium))
+                                                .foregroundColor(Color(red: 0.20, green: 0.72, blue: 0.45))
                                         } else if isSelected {
                                             Text("当前聚焦")
                                                 .font(.system(size: 9.5, weight: .medium))
                                                 .foregroundColor(.accentColor)
                                         } else if isOpen {
-                                            Text("运行中")
+                                            Text("就绪在线")
                                                 .font(.system(size: 9.5))
                                                 .foregroundColor(.secondary)
                                         } else {
@@ -213,7 +217,12 @@ struct StatusBarDashboardView: View {
                                                 .foregroundColor(.secondary.opacity(0.7))
                                         }
 
-                                        if let usage = snap.usageText, !usage.isEmpty {
+                                        if let task = snap.taskTitle, !task.isEmpty {
+                                            Text("· \(task)")
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary.opacity(0.75))
+                                                .lineLimit(1)
+                                        } else if let usage = snap.usageText, !usage.isEmpty {
                                             Text("· \(usage)")
                                                 .font(.system(size: 9.5))
                                                 .foregroundColor(.secondary.opacity(0.7))
