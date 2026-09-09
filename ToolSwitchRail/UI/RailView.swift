@@ -180,7 +180,7 @@ struct RailView: View {
                     selectAndAddApp()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .regular))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
@@ -192,7 +192,7 @@ struct RailView: View {
                     toggleAppearance()
                 } label: {
                     Image(systemName: appearanceIcon)
-                        .font(.system(size: 13, weight: .regular))
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
@@ -204,7 +204,7 @@ struct RailView: View {
                     windowManager.showSettingsMenu()
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 14, weight: .regular))
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
