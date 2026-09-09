@@ -55,16 +55,6 @@ struct StatusBarDashboardView: View {
                 }
 
                 Spacer()
-
-                Button {
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
-                        .foregroundColor(.secondary.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .help("关闭面板")
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
