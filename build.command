@@ -58,6 +58,10 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Tool Switch Rail 需要控制系统外观与窗口切换。</string>
 </dict>
@@ -65,6 +69,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 PLIST
 
 cp "$SRC_DIR/Resources/default-config.json" "$RESOURCES_DIR/default-config.json"
+if [ -f "$SRC_DIR/Resources/AppIcon.icns" ]; then
+  cp "$SRC_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+fi
 if [ -d "$SRC_DIR/Resources/icons" ]; then
   mkdir -p "$RESOURCES_DIR/icons"
   cp -R "$SRC_DIR/Resources/icons/"* "$RESOURCES_DIR/icons/"
@@ -109,13 +116,32 @@ chmod +x "$EXECUTABLE"
 echo "[4/5] 本地签名与代码需求绑定..."
 /usr/bin/codesign --force --deep -s - -r="designated => identifier \"com.donald.toolswitchrail\"" "$APP_DIR" >/dev/null
 
-echo "[5/5] 完成。"
-echo ""
+echo "[5/5] 安装并同步至 /Applications 与 桌面快捷打开图标..."
+APPLICATIONS_TARGET="/Applications/$APP_NAME.app"
+rm -rf "$APPLICATIONS_TARGET"
+cp -R "$APP_DIR" "$APPLICATIONS_TARGET"
+touch "$APPLICATIONS_TARGET"
+
+DESKTOP_DIR="$HOME/Desktop"
+if [ -d "$DESKTOP_DIR" ]; then
+  osascript -e "tell application \"Finder\"
+    set appFile to POSIX file \"$APPLICATIONS_TARGET\"
+    set deskFolder to POSIX file \"$DESKTOP_DIR\"
+    if exists alias file \"$APP_NAME\" of folder deskFolder then
+      delete alias file \"$APP_NAME\" of folder deskFolder
+    end if
+    make alias file to appFile at folder deskFolder
+  end tell" >/dev/null 2>&1 || true
+  touch "$DESKTOP_DIR/$APP_NAME" 2>/dev/null || true
+fi
+
 echo "生成位置："
-echo "$APP_DIR"
+echo "  - 构建目录: $APP_DIR"
+echo "  - 应用程序: $APPLICATIONS_TARGET"
+echo "  - 桌面快速打开: $DESKTOP_DIR/$APP_NAME"
 echo ""
 echo "首次运行后，请到："
 echo "系统设置 → 隐私与安全性 → 辅助功能"
 echo "允许 Tool Switch Rail。"
 echo ""
-open -R "$APP_DIR"
+
