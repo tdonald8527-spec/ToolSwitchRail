@@ -20,7 +20,7 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Tool Switch Rail</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Tool Switch Rail 需要控制系统外观与窗口切换。</string>
 </dict>
 </plist>

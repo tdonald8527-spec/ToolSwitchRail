@@ -58,8 +58,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>Tool Switch Rail</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Tool Switch Rail 需要控制系统外观与窗口切换。</string>
 </dict>
 </plist>
 PLIST

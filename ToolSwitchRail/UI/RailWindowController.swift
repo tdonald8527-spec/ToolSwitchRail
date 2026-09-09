@@ -205,9 +205,8 @@ final class RailWindowController: NSWindowController {
         }
     }
 
-    func applyAppearance(for tool: ToolItem?) {
+    func applyAppearance(for tool: ToolItem? = nil) {
         guard let window else { return }
-        let activeTool = tool ?? windowManager.activeTool
         let targetAppearanceName: NSAppearance.Name
         let mode = configStore.configuration.workspace.appearance
         switch mode {
@@ -216,18 +215,7 @@ final class RailWindowController: NSWindowController {
         case .dark:
             targetAppearanceName = .darkAqua
         case .system:
-            if let activeTool = activeTool {
-                switch activeTool.resolvedTheme {
-                case .light:
-                    targetAppearanceName = .aqua
-                case .dark:
-                    targetAppearanceName = .darkAqua
-                case .system:
-                    targetAppearanceName = SystemAppearanceManager.shared.isDarkMode ? .darkAqua : .aqua
-                }
-            } else {
-                targetAppearanceName = SystemAppearanceManager.shared.isDarkMode ? .darkAqua : .aqua
-            }
+            targetAppearanceName = SystemAppearanceManager.shared.isDarkMode ? .darkAqua : .aqua
         }
 
         if window.appearance?.name != targetAppearanceName {
