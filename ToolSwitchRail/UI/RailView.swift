@@ -22,11 +22,52 @@ struct RailView: View {
         windowManager.activeTool
     }
 
-    private var currentBackgroundColor: Color {
-        if let tool = currentTool {
-            return Color(hex: tool.resolvedBackgroundColor)
+    private var currentAppearance: AppearanceMode {
+        configStore.configuration.workspace.appearance
+    }
+
+    private var isEffectiveLightMode: Bool {
+        switch currentAppearance {
+        case .light:
+            return true
+        case .dark:
+            return false
+        case .system:
+            if let tool = currentTool {
+                if tool.resolvedTheme == .light { return true }
+                if tool.resolvedTheme == .dark { return false }
+            }
+            if let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) {
+                return match == .aqua
+            }
+            return false
         }
-        return Color(hex: "#212121")
+    }
+
+    private var currentBackgroundColor: Color {
+        if isEffectiveLightMode {
+            if let tool = currentTool, tool.resolvedBackgroundColor.isLightHexColor {
+                return Color(hex: tool.resolvedBackgroundColor)
+            }
+            return Color(hex: "#F5F5F7")
+        } else {
+            if let tool = currentTool, !tool.resolvedBackgroundColor.isLightHexColor {
+                return Color(hex: tool.resolvedBackgroundColor)
+            }
+            return Color(hex: "#1E1E1E")
+        }
+    }
+
+    private var controlForegroundColor: Color {
+        isEffectiveLightMode ? Color(white: 0.15, opacity: 0.85) : Color(white: 0.95, opacity: 0.85)
+    }
+
+    private var dividerColor: Color {
+        isEffectiveLightMode ? Color.black.opacity(0.12) : Color.white.opacity(0.12)
+    }
+
+    private var dragHandleColor: Color {
+        isEffectiveLightMode ? Color.black.opacity(0.22) : Color.white.opacity(0.25)
     }
 
     var body: some View {
@@ -40,14 +81,14 @@ struct RailView: View {
             HStack(spacing: 0) {
                 Spacer().frame(width: max(0, railWidth - 0.5))
                 Rectangle()
-                    .fill(Color.primary.opacity(0.10))
+                    .fill(dividerColor)
                     .frame(width: 0.5)
                     .padding(.vertical, 14)
                 Spacer(minLength: 0)
             }
 
             VStack(spacing: 6) {
-                RailHeaderDragArea(windowManager: windowManager)
+                RailHeaderDragArea(windowManager: windowManager, isLightMode: isEffectiveLightMode)
                     .padding(.top, 8)
 
                 ForEach(Array(tools.enumerated()), id: \.element.id) { index, tool in
@@ -57,6 +98,7 @@ struct RailView: View {
                     ToolIconView(
                         tool: tool,
                         isSelected: windowManager.selectedToolID == tool.id,
+                        isLightMode: isEffectiveLightMode,
                         isPressed: reorderManager.pressedToolID == tool.id,
                         isHovered: reorderManager.hoveredToolID == tool.id,
                         isLaunching: windowManager.launchingToolID == tool.id,
@@ -139,7 +181,7 @@ struct RailView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 15, weight: .regular))
-                        .foregroundColor(.primary.opacity(0.75))
+                        .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
                 }
@@ -151,7 +193,7 @@ struct RailView: View {
                 } label: {
                     Image(systemName: appearanceIcon)
                         .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(.primary.opacity(0.75))
+                        .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
                 }
@@ -163,7 +205,7 @@ struct RailView: View {
                 } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 14, weight: .regular))
-                        .foregroundColor(.primary.opacity(0.75))
+                        .foregroundColor(controlForegroundColor)
                         .frame(width: 40, height: 30)
                         .contentShape(Rectangle())
                 }
@@ -200,6 +242,7 @@ struct RailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(isEffectiveLightMode ? .light : .dark)
     }
 
     private var appearanceIcon: String {
@@ -251,6 +294,7 @@ struct RailView: View {
 
 struct RailHeaderDragArea: View {
     @ObservedObject var windowManager: WindowManager
+    var isLightMode: Bool = false
 
     var body: some View {
         VStack(spacing: 5) {
@@ -265,7 +309,7 @@ struct RailHeaderDragArea: View {
             }
 
             Capsule()
-                .fill(Color.primary.opacity(0.18))
+                .fill(isLightMode ? Color.black.opacity(0.22) : Color.white.opacity(0.25))
                 .frame(width: 22, height: 3)
         }
         .frame(width: 56, height: 34)
@@ -439,5 +483,32 @@ extension Color {
             blue: Double(b) / 255,
             opacity: Double(a) / 255
         )
+    }
+}
+
+extension String {
+    var isLightHexColor: Bool {
+        let cleanHex = trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: cleanHex).scanHexInt64(&int)
+        let r, g, b: Double
+        switch cleanHex.count {
+        case 3:
+            r = Double(((int >> 8) & 0xF) * 17) / 255.0
+            g = Double(((int >> 4) & 0xF) * 17) / 255.0
+            b = Double((int & 0xF) * 17) / 255.0
+        case 6:
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+        case 8:
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+        default:
+            return false
+        }
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return luminance >= 0.5
     }
 }

@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 let geometry = self.windowManager.workspaceGeometry()
                 self.railWindowController.move(to: geometry.rail)
-                self.railWindowController.applyAppearance(for: nil)
+                self.railWindowController.applyAppearance(for: self.windowManager.activeTool)
             }
             .store(in: &cancellables)
 

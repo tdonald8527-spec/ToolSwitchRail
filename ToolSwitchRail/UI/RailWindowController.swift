@@ -13,6 +13,7 @@ final class RailWindowController: NSWindowController {
     private let statusMonitor: ToolStatusMonitor
     private var priorFrontmostApp: NSRunningApplication?
     private var visibilityAnimationGeneration: UInt = 0
+    private var hostingView: NSHostingView<RailView>?
 
     static let seamExtension: CGFloat = 0
 
@@ -54,6 +55,7 @@ final class RailWindowController: NSWindowController {
         hosting.layer?.cornerCurve = .continuous
         hosting.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
         hosting.layer?.masksToBounds = true
+        self.hostingView = hosting
 
         let container = RailContainerView(hostingView: hosting, windowManager: windowManager)
         panel.contentView = container
@@ -205,7 +207,8 @@ final class RailWindowController: NSWindowController {
 
     func applyAppearance(for tool: ToolItem?) {
         guard let window else { return }
-        let targetAppearanceName: NSAppearance.Name?
+        let activeTool = tool ?? windowManager.activeTool
+        let targetAppearanceName: NSAppearance.Name
         let mode = configStore.configuration.workspace.appearance
         switch mode {
         case .light:
@@ -213,26 +216,27 @@ final class RailWindowController: NSWindowController {
         case .dark:
             targetAppearanceName = .darkAqua
         case .system:
-            if let tool = tool {
-                switch tool.resolvedTheme {
+            if let activeTool = activeTool {
+                switch activeTool.resolvedTheme {
                 case .light:
                     targetAppearanceName = .aqua
                 case .dark:
                     targetAppearanceName = .darkAqua
                 case .system:
-                    targetAppearanceName = nil
+                    let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+                    targetAppearanceName = (match == .aqua) ? .aqua : .darkAqua
                 }
             } else {
-                targetAppearanceName = nil
+                let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+                targetAppearanceName = (match == .aqua) ? .aqua : .darkAqua
             }
         }
 
-        if let name = targetAppearanceName {
-            if window.appearance?.name != name {
-                window.appearance = NSAppearance(named: name)
-            }
-        } else if window.appearance != nil {
-            window.appearance = nil
+        if window.appearance?.name != targetAppearanceName {
+            window.appearance = NSAppearance(named: targetAppearanceName)
+        }
+        if hostingView?.appearance?.name != targetAppearanceName {
+            hostingView?.appearance = NSAppearance(named: targetAppearanceName)
         }
     }
 }

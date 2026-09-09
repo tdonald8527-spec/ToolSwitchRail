@@ -51,6 +51,7 @@ struct ToolItem: Codable, Identifiable, Hashable {
         if let t = theme?.lowercased() {
             if t == "light" { return .light }
             if t == "dark" { return .dark }
+            if t == "system" { return .system }
         }
         switch id.lowercased() {
         case "workbuddy":

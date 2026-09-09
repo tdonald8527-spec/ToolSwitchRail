@@ -4,6 +4,7 @@ import AppKit
 struct ToolIconView: View {
     let tool: ToolItem
     let isSelected: Bool
+    var isLightMode: Bool = false
     var isPressed: Bool = false
     var isHovered: Bool = false
     var isLaunching: Bool = false
@@ -14,30 +15,42 @@ struct ToolIconView: View {
     var onRemove: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
 
+    private var cardFillColor: Color {
+        isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.12)
+    }
+
+    private var cardBorderColor: Color {
+        isLightMode ? Color.black.opacity(0.12) : Color.white.opacity(0.16)
+    }
+
+    private var hoverFillColor: Color {
+        isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
             // Smooth background highlight
             if isSelected {
                 if let namespace = namespace {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.09))
+                        .fill(cardFillColor)
                         .overlay {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                                .stroke(cardBorderColor, lineWidth: 0.8)
                         }
                         .matchedGeometryEffect(id: "activeToolBg", in: namespace)
                 } else {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.09))
+                        .fill(cardFillColor)
                         .overlay {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                                .stroke(cardBorderColor, lineWidth: 0.8)
                         }
                 }
             } else if isHovered {
                 // Soft hover background
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
+                    .fill(hoverFillColor)
                     .transition(.opacity)
             }
 
@@ -126,11 +139,11 @@ struct ToolIconView: View {
         } else if let symbol = tool.symbolName, !symbol.isEmpty {
             Image(systemName: symbol)
                 .font(.system(size: 20, weight: .regular))
-                .foregroundColor(.primary.opacity(isSelected ? 0.95 : 0.72))
+                .foregroundColor(isLightMode ? Color(white: 0.15).opacity(isSelected ? 0.95 : 0.72) : Color(white: 0.95).opacity(isSelected ? 0.95 : 0.72))
         } else {
             Text(String(tool.name.prefix(1)).uppercased())
                 .font(.system(size: 16, weight: .medium, design: .rounded))
-                .foregroundColor(.primary.opacity(isSelected ? 0.95 : 0.72))
+                .foregroundColor(isLightMode ? Color(white: 0.15).opacity(isSelected ? 0.95 : 0.72) : Color(white: 0.95).opacity(isSelected ? 0.95 : 0.72))
         }
     }
 }
