@@ -246,6 +246,24 @@ struct StatusBarDashboardView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(DashboardToolCardButtonStyle(isLightMode: isLightMode))
+                        .contextMenu {
+                            Button {
+                                withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                    windowManager.switchTo(tool)
+                                    onClose()
+                                }
+                            } label: {
+                                Label("切换至 \(tool.name)", systemImage: "arrow.up.forward.app")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                    configStore.removeTool(id: tool.id)
+                                }
+                            } label: {
+                                Label("从 Rail 移除 \(tool.name)", systemImage: "trash")
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -266,6 +284,23 @@ struct StatusBarDashboardView: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+
+                Menu {
+                    ForEach(configStore.configuration.tools) { tool in
+                        Button(role: .destructive) {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                configStore.removeTool(id: tool.id)
+                            }
+                        } label: {
+                            Label("移除 \(tool.name)", systemImage: "trash")
+                        }
+                    }
+                } label: {
+                    Label("移除应用", systemImage: "minus")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .menuStyle(.borderlessButton)
 
                 Spacer()
 

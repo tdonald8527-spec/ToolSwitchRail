@@ -114,7 +114,7 @@ struct RailView: View {
                                 onSelect(tool)
                             }
                         }
-                        .gesture(
+                        .simultaneousGesture(
                             DragGesture(minimumDistance: 6)
                                 .onChanged { value in
                                     let dy = value.translation.height
@@ -131,6 +131,21 @@ struct RailView: View {
                                     }
                                 }
                         )
+                        .contextMenu {
+                            Button {
+                                onSelect(tool)
+                            } label: {
+                                Label("切换至 \(tool.name)", systemImage: "arrow.up.forward.app")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                    configStore.removeTool(id: tool.id)
+                                }
+                            } label: {
+                                Label("从 Rail 移除", systemImage: "trash")
+                            }
+                        }
                 }
 
                 Spacer(minLength: 10)

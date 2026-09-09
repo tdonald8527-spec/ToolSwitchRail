@@ -139,6 +139,21 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         reloadCfg.target = self
         menu.addItem(reloadCfg)
 
+        let removeSubmenu = NSMenu()
+        let currentTools = configStore.configuration.tools
+        for tool in currentTools {
+            let item = NSMenuItem(title: "移除 \(tool.name)", action: #selector(menuActionRemoveTool(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tool.id
+            removeSubmenu.addItem(item)
+        }
+        if !currentTools.isEmpty {
+            let removeParent = NSMenuItem(title: "从 Rail 移除应用", action: nil, keyEquivalent: "")
+            removeParent.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+            removeParent.submenu = removeSubmenu
+            menu.addItem(removeParent)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         let axStatusTitle = AccessibilityPermission.isTrusted ? "辅助功能权限：已开启 (正常)" : "⚠️ 辅助功能权限：未开启 (点击修复)"
@@ -167,6 +182,10 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     @objc private func menuActionOpenConfig() { configStore.openConfigFile() }
     @objc private func menuActionRevealConfig() { configStore.revealConfigFile() }
     @objc private func menuActionReloadConfig() { configStore.reload() }
+    @objc private func menuActionRemoveTool(_ sender: NSMenuItem) {
+        guard let toolID = sender.representedObject as? String else { return }
+        configStore.removeTool(id: toolID)
+    }
     @objc private func menuActionCheckAX() {
         AccessibilityPermission.promptIfNeeded()
         if !AccessibilityPermission.isTrusted {

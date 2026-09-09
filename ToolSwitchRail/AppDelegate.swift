@@ -167,6 +167,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reloadConfig.target = self
         menu.addItem(reloadConfig)
 
+        let removeSubmenu = NSMenu()
+        let currentTools = configStore.configuration.tools
+        for tool in currentTools {
+            let item = NSMenuItem(title: "移除 \(tool.name)", action: #selector(removeToolAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tool
+            removeSubmenu.addItem(item)
+        }
+        if !currentTools.isEmpty {
+            let removeParent = NSMenuItem(title: "从 Rail 移除应用", action: nil, keyEquivalent: "")
+            removeParent.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+            removeParent.submenu = removeSubmenu
+            menu.addItem(removeParent)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "退出 Tool Switch Rail", action: #selector(quitAction), keyEquivalent: "q")
@@ -202,8 +217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func removeToolAction(_ sender: NSMenuItem) {
-        guard let tool = sender.representedObject as? ToolItem else { return }
-        configStore.removeTool(id: tool.id)
+        if let tool = sender.representedObject as? ToolItem {
+            configStore.removeTool(id: tool.id)
+        } else if let id = sender.representedObject as? String {
+            configStore.removeTool(id: id)
+        }
     }
 
     @objc private func toggleSystemAppearanceAction() {
