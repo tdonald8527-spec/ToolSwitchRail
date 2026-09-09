@@ -66,10 +66,14 @@ struct ToolStatusSnapshot: Equatable {
             proposedStatus: status,
             proposedReliable: sourceReliable
         )
+        let key = toolID.lowercased()
+        let clearCrossAppMetadata = (key == "chatgpt" || key == "chatgpt-mac")
+            || (key == "codex" && guarded.status == .unknown)
+
         self.toolID = toolID
         self.status = guarded.status
-        self.taskTitle = taskTitle
-        self.usageText = usageText
+        self.taskTitle = clearCrossAppMetadata ? nil : taskTitle
+        self.usageText = clearCrossAppMetadata ? nil : usageText
         self.sourceReliable = guarded.sourceReliable
     }
 
@@ -95,15 +99,16 @@ private enum StatusReliabilityGuard {
         let key = toolID.lowercased()
 
         if key == "chatgpt" || key == "chatgpt-mac" {
-            // ChatGPT Mac must never inherit Codex log activity. Until a dedicated
-            // ChatGPT status source exists, only report a trustworthy online/idle state.
+            // A separately configured ChatGPT Mac app must never inherit Codex log activity.
+            // Until a dedicated ChatGPT source exists, only report trustworthy online/idle.
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.chat").isEmpty
             return running ? (.idle, true) : (.unknown, false)
         }
 
         if key == "codex" {
-            // The existing Codex probe reads com.openai.codex logs. Do not let the
-            // separate ChatGPT process make a stale Codex log look active.
+            // The existing "ChatGPT (Mac)" entry in this project is com.openai.codex.
+            // Keep its existing Codex log probe, but require that exact process to be
+            // alive so a separate com.openai.chat process cannot activate stale logs.
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
             return running ? (proposedStatus, proposedReliable) : (.unknown, false)
         }
@@ -119,7 +124,7 @@ private enum StatusReliabilityGuard {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.tencent.workbuddy.mac").first else {
             // Local files can outlive the process. Never surface stale Working / Approval
             // after WorkBuddy itself is no longer running.
-            return (.idle, false)
+            return (.unknown, false)
         }
 
         let fm = FileManager.default
@@ -232,7 +237,7 @@ private enum StatusReliabilityGuard {
 
     private static func hasActiveRunID(_ line: String) -> Bool {
         guard let range = line.range(of: "runid=") else { return false }
-        let suffix = line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
         if suffix.isEmpty { return false }
         return !suffix.hasPrefix("(none)") && !suffix.hasPrefix("none") && !suffix.hasPrefix("null")
     }
