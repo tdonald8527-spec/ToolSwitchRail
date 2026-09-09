@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
@@ -63,7 +64,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .dropFirst()
             .sink { [weak self] _ in
                 self?.registerHotKeys()
-                self?.updateStatusItemMenu()
                 guard let self else { return }
                 let geometry = self.windowManager.workspaceGeometry()
                 self.railWindowController.move(to: geometry.rail)
@@ -71,17 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        statusMonitor.$quotaReports
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.updateStatusItemMenu()
-            }
-            .store(in: &cancellables)
-
         SystemAppearanceManager.shared.$isDarkMode
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.updateStatusItemMenu()
                 guard let self else { return }
                 self.railWindowController.applyAppearance(for: self.windowManager.activeTool)
             }
@@ -95,124 +87,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    private var popover: NSPopover?
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Tool Switch Rail")
             button.image?.isTemplate = true
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
         }
-        updateStatusItemMenu()
+
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.animates = true
+        let dashboard = StatusBarDashboardView(
+            configStore: configStore,
+            windowManager: windowManager,
+            statusMonitor: statusMonitor,
+            onClose: { [weak self] in
+                self?.popover?.performClose(nil)
+            }
+        )
+        pop.contentViewController = NSHostingController(rootView: dashboard)
+        self.popover = pop
     }
 
-    private func updateStatusItemMenu() {
+    @objc private func statusItemClicked(_ sender: AnyObject?) {
+        guard let button = statusItem?.button else { return }
+        let isRightClick = (NSApp.currentEvent?.type == .rightMouseUp)
+
+        if isRightClick {
+            popover?.performClose(nil)
+            showQuickContextMenu(for: button)
+            return
+        }
+
+        if let popover = popover {
+            if popover.isShown {
+                popover.performClose(sender)
+            } else {
+                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                popover.contentViewController?.view.window?.makeKey()
+            }
+        }
+    }
+
+    private func showQuickContextMenu(for button: NSStatusBarButton) {
         let menu = NSMenu()
 
-        let toggleItem = NSMenuItem(title: "显示 / 最小化", action: #selector(toggleMinimizeAction), keyEquivalent: "m")
+        let toggleItem = NSMenuItem(title: "显示 / 最小化 Rail", action: #selector(toggleMinimizeAction), keyEquivalent: "m")
         toggleItem.keyEquivalentModifierMask = [.command, .option]
         toggleItem.target = self
         menu.addItem(toggleItem)
 
-        // MARK: - Agent Quota & Status Section
-        let reports = statusMonitor.quotaReports
-        if !reports.isEmpty {
-            menu.addItem(NSMenuItem.separator())
-            let header = NSMenuItem(title: "桌面 Agent 额度与状态", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-
-            for report in reports {
-                let item = NSMenuItem(title: "  \(report.title): \(report.detail)", action: nil, keyEquivalent: "")
-                if !report.subDetails.isEmpty {
-                    let subMenu = NSMenu()
-                    let subHeader = NSMenuItem(title: report.detail, action: nil, keyEquivalent: "")
-                    subHeader.isEnabled = false
-                    subMenu.addItem(subHeader)
-                    subMenu.addItem(NSMenuItem.separator())
-                    for sub in report.subDetails {
-                        let subItem = NSMenuItem(title: sub, action: nil, keyEquivalent: "")
-                        subItem.isEnabled = false
-                        subMenu.addItem(subItem)
-                    }
-                    item.submenu = subMenu
-                    item.isEnabled = true
-                } else {
-                    item.isEnabled = false
-                }
-                menu.addItem(item)
-            }
-        }
-
-        menu.addItem(NSMenuItem.separator())
-
-        let tools = configStore.configuration.tools.filter(\.enabled)
-        for (idx, tool) in tools.enumerated() {
-            let keyEquivalent = (idx < 9) ? "\(idx + 1)" : ""
-            let item = NSMenuItem(title: tool.name, action: #selector(selectToolAction(_:)), keyEquivalent: keyEquivalent)
-            if !keyEquivalent.isEmpty {
-                item.keyEquivalentModifierMask = [.command, .option]
-            }
-            item.target = self
-            item.representedObject = tool
-
-            let toolMenu = NSMenu()
-            let switchItem = NSMenuItem(title: "切换至 \(tool.name)", action: #selector(selectToolAction(_:)), keyEquivalent: "")
-            switchItem.target = self
-            switchItem.representedObject = tool
-            toolMenu.addItem(switchItem)
-
-            toolMenu.addItem(NSMenuItem.separator())
-
-            let removeItem = NSMenuItem(title: "从 Rail 移除", action: #selector(removeToolAction(_:)), keyEquivalent: "")
-            removeItem.target = self
-            removeItem.representedObject = tool
-            toolMenu.addItem(removeItem)
-
-            item.submenu = toolMenu
-            menu.addItem(item)
-        }
-
-        menu.addItem(NSMenuItem.separator())
-
-        // MARK: - Add App & Appearance Controls
-        let addItem = NSMenuItem(title: "添加应用...", action: #selector(addAppAction), keyEquivalent: "")
-        addItem.target = self
-        menu.addItem(addItem)
-
-        let appearanceItem = NSMenuItem(title: "系统外观", action: nil, keyEquivalent: "")
-        let appearanceMenu = NSMenu()
         let isDark = SystemAppearanceManager.shared.isDarkMode
-
-        let systemAppearanceToggleItem = NSMenuItem(
+        let appearanceItem = NSMenuItem(
             title: isDark ? "切换为系统浅色模式" : "切换为系统深色模式",
             action: #selector(toggleSystemAppearanceAction),
             keyEquivalent: ""
         )
-        systemAppearanceToggleItem.target = self
-        appearanceMenu.addItem(systemAppearanceToggleItem)
-        appearanceMenu.addItem(NSMenuItem.separator())
-
-        let darkItem = NSMenuItem(title: "深色模式", action: #selector(setSystemAppearanceDark), keyEquivalent: "")
-        darkItem.target = self
-        darkItem.state = isDark ? .on : .off
-        appearanceMenu.addItem(darkItem)
-
-        let lightItem = NSMenuItem(title: "浅色模式", action: #selector(setSystemAppearanceLight), keyEquivalent: "")
-        lightItem.target = self
-        lightItem.state = !isDark ? .on : .off
-        appearanceMenu.addItem(lightItem)
-
-        appearanceItem.submenu = appearanceMenu
+        appearanceItem.target = self
         menu.addItem(appearanceItem)
 
         menu.addItem(NSMenuItem.separator())
 
-        let configItem = NSMenuItem(title: "打开配置文件", action: #selector(openConfigAction), keyEquivalent: "")
-        configItem.target = self
-        menu.addItem(configItem)
+        let openConfig = NSMenuItem(title: "打开配置文件", action: #selector(openConfigAction), keyEquivalent: "")
+        openConfig.target = self
+        menu.addItem(openConfig)
 
-        let reloadItem = NSMenuItem(title: "重新载入配置", action: #selector(reloadConfigAction), keyEquivalent: "")
-        reloadItem.target = self
-        menu.addItem(reloadItem)
+        let reloadConfig = NSMenuItem(title: "重新载入配置", action: #selector(reloadConfigAction), keyEquivalent: "")
+        reloadConfig.target = self
+        menu.addItem(reloadConfig)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -220,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        statusItem?.menu = menu
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
     @objc private func toggleMinimizeAction() {

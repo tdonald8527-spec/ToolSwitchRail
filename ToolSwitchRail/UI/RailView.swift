@@ -166,45 +166,53 @@ struct RailView: View {
                             }
                     )
 
-                Divider()
-                    .padding(.horizontal, 10)
-                    .opacity(0.4)
+                // Refined bottom control capsule
+                VStack(spacing: 2) {
+                    Button {
+                        selectAndAddApp()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(controlForegroundColor)
+                            .frame(width: 36, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("添加应用 (.app)")
 
-                Button {
-                    selectAndAddApp()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(controlForegroundColor)
-                        .frame(width: 40, height: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("添加应用 (.app)")
+                    Button {
+                        toggleAppearance()
+                    } label: {
+                        Image(systemName: appearanceIcon)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(controlForegroundColor)
+                            .frame(width: 36, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(appearanceHelpText)
 
-                Button {
-                    toggleAppearance()
-                } label: {
-                    Image(systemName: appearanceIcon)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(controlForegroundColor)
-                        .frame(width: 40, height: 30)
-                        .contentShape(Rectangle())
+                    Button {
+                        windowManager.showSettingsMenu()
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(controlForegroundColor)
+                            .frame(width: 36, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("设置与配置文件")
                 }
-                .buttonStyle(.plain)
-                .help(appearanceHelpText)
-
-                Button {
-                    windowManager.showSettingsMenu()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(controlForegroundColor)
-                        .frame(width: 40, height: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("设置与配置文件")
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(isEffectiveLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(isEffectiveLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.8)
+                        )
+                )
 
                 Spacer().frame(height: 10)
                     .contentShape(Rectangle())

@@ -89,6 +89,7 @@ SWIFT_FILES=(
   "$SRC_DIR/UI/NeedsYouPanel.swift"
   "$SRC_DIR/UI/RailView.swift"
   "$SRC_DIR/UI/RailWindowController.swift"
+  "$SRC_DIR/UI/StatusBarDashboardView.swift"
 )
 
 xcrun swiftc \
