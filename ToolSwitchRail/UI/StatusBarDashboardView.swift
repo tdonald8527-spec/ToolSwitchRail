@@ -1,15 +1,14 @@
 import SwiftUI
 import AppKit
 
-struct DashboardToolRowButtonStyle: ButtonStyle {
+struct DashboardToolCardButtonStyle: ButtonStyle {
     var isLightMode: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(configuration.isPressed ? (isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.12)) : Color.clear)
-            )
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -166,10 +165,15 @@ struct StatusBarDashboardView: View {
             .padding(.top, 10)
             .padding(.bottom, 6)
 
-            // MARK: - Agent Cards List
+            // MARK: - Agent Cards List (2-Column Compact Grid)
+            let columns = [
+                GridItem(.flexible(), spacing: 8),
+                GridItem(.flexible(), spacing: 8)
+            ]
+            let tools = configStore.configuration.tools.filter(\.enabled)
+
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 4) {
-                    let tools = configStore.configuration.tools.filter(\.enabled)
+                LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(tools) { tool in
                         let isOpen = windowManager.openToolIDs.contains(tool.id)
                         let isSelected = windowManager.selectedToolID == tool.id
@@ -181,85 +185,74 @@ struct StatusBarDashboardView: View {
                                 onClose()
                             }
                         } label: {
-                            HStack(spacing: 10) {
+                            HStack(spacing: 7) {
                                 // App Icon View
                                 iconView(for: tool)
 
                                 // Tool Info
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
+                                VStack(alignment: .leading, spacing: 1.5) {
+                                    HStack(spacing: 3) {
                                         Text(tool.name)
-                                            .font(.system(size: 12, weight: .medium))
+                                            .font(.system(size: 11, weight: .medium))
                                             .foregroundColor(.primary)
+                                            .lineLimit(1)
 
-                                        if isSelected {
+                                        Spacer(minLength: 0)
+
+                                        Circle()
+                                            .fill(snap.status.needsYou ? Color.orange : (isOpen ? Color.green : Color.secondary.opacity(0.35)))
+                                            .frame(width: 6, height: 6)
+                                    }
+
+                                    HStack(spacing: 3) {
+                                        if snap.status.needsYou {
+                                            Text("需确认")
+                                                .font(.system(size: 9.5, weight: .medium))
+                                                .foregroundColor(.orange)
+                                        } else if isSelected {
                                             Text("当前聚焦")
-                                                .font(.system(size: 9, weight: .medium))
+                                                .font(.system(size: 9.5, weight: .medium))
                                                 .foregroundColor(.accentColor)
-                                                .padding(.horizontal, 5)
-                                                .padding(.vertical, 1)
-                                                .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                        } else if isOpen {
+                                            Text("运行中")
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary)
+                                        } else {
+                                            Text("就绪")
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary.opacity(0.7))
+                                        }
+
+                                        if let usage = snap.usageText, !usage.isEmpty {
+                                            Text("· \(usage)")
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary.opacity(0.7))
+                                                .lineLimit(1)
                                         }
                                     }
-
-                                    if let usage = snap.usageText, !usage.isEmpty {
-                                        Text(usage)
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    } else {
-                                        Text(tool.appName ?? tool.name)
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary.opacity(0.7))
-                                            .lineLimit(1)
-                                    }
-                                }
-
-                                Spacer()
-
-                                // Live Status Badge
-                                if snap.status.needsYou {
-                                    HStack(spacing: 4) {
-                                        Circle().fill(Color.orange).frame(width: 6, height: 6)
-                                        Text("需确认")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundColor(.orange)
-                                    }
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(Color.orange.opacity(0.12), in: Capsule())
-                                } else if isOpen {
-                                    HStack(spacing: 4) {
-                                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                                        Text("运行中")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundColor(.green)
-                                    }
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(Color.green.opacity(0.12), in: Capsule())
-                                } else {
-                                    HStack(spacing: 4) {
-                                        Circle().fill(Color.secondary.opacity(0.4)).frame(width: 5, height: 5)
-                                        Text("就绪")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
+                                    .lineLimit(1)
                                 }
                             }
-                            .padding(.horizontal, 10)
+                            .padding(.horizontal, 8)
                             .padding(.vertical, 7)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(isSelected ? (isLightMode ? Color.accentColor.opacity(0.08) : Color.accentColor.opacity(0.16)) : cardBackground)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(isSelected ? Color.accentColor.opacity(0.45) : cardBorder, lineWidth: 0.8)
+                            )
                             .contentShape(Rectangle())
                         }
-                        .buttonStyle(DashboardToolRowButtonStyle(isLightMode: isLightMode))
+                        .buttonStyle(DashboardToolCardButtonStyle(isLightMode: isLightMode))
                     }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: 270)
+            .frame(maxHeight: 280)
 
             Divider()
                 .opacity(0.5)
@@ -321,16 +314,16 @@ struct StatusBarDashboardView: View {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(width: 24, height: 24)
+                .frame(width: 22, height: 22)
         } else if let symbol = tool.symbolName, !symbol.isEmpty {
             Image(systemName: symbol)
-                .font(.system(size: 15))
-                .frame(width: 24, height: 24)
+                .font(.system(size: 14))
+                .frame(width: 22, height: 22)
                 .foregroundColor(.primary)
         } else {
             Text(String(tool.name.prefix(1)).uppercased())
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .frame(width: 24, height: 24)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .frame(width: 22, height: 22)
                 .foregroundColor(.primary)
         }
     }

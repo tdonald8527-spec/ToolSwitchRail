@@ -63,30 +63,58 @@ struct ToolItem: Codable, Identifiable, Hashable {
         }
     }
 
+    func resolvedBackgroundColor(for isLight: Bool) -> String {
+        if isLight {
+            if let bg = backgroundColor?.trimmingCharacters(in: .whitespacesAndNewlines), !bg.isEmpty, bg.isLightHexColor {
+                return bg
+            }
+            switch id.lowercased() {
+            case "antigravity":
+                return "#F3F3F3"
+            case "workbuddy":
+                return "#F2F2F2"
+            case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+                return "#F9F9F9"
+            case "hermes":
+                return "#F5F5F7"
+            case "grok-bot", "grokbot", "grok-web", "grok":
+                return "#FFFFFF"
+            case "wps-lingxi", "wpslingxi", "lingxi":
+                return "#F5F5F7"
+            case "gemini-web", "gemini":
+                return "#FFFFFF"
+            default:
+                return "#F3F3F3"
+            }
+        } else {
+            if let bg = backgroundColor?.trimmingCharacters(in: .whitespacesAndNewlines), !bg.isEmpty {
+                return bg
+            }
+            switch id.lowercased() {
+            case "workbuddy":
+                return "#1F1F1F"
+            case "wps-lingxi", "wpslingxi", "lingxi":
+                return "#121212"
+            case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
+                return "#212121"
+            case "antigravity":
+                return "#181818"
+            case "gemini-web", "gemini":
+                return "#131314"
+            case "hermes":
+                return "#111111"
+            case "grok-bot", "grokbot", "grok-web", "grok":
+                return "#000000"
+            case "chatgpt-web":
+                return "#212121"
+            default:
+                return "#1E1E1E"
+            }
+        }
+    }
+
     var resolvedBackgroundColor: String {
-        if let bg = backgroundColor?.trimmingCharacters(in: .whitespacesAndNewlines), !bg.isEmpty {
-            return bg
-        }
-        switch id.lowercased() {
-        case "workbuddy":
-            return "#1F1F1F"
-        case "wps-lingxi", "wpslingxi", "lingxi":
-            return "#121212"
-        case "codex", "chatgpt", "chatgpt-app", "chatgpt-mac":
-            return "#212121"
-        case "antigravity":
-            return "#181818"
-        case "gemini-web", "gemini":
-            return "#131314"
-        case "hermes":
-            return "#111111"
-        case "grok-bot", "grokbot", "grok-web", "grok":
-            return "#000000"
-        case "chatgpt-web":
-            return "#212121"
-        default:
-            return resolvedTheme == .light ? "#FFFFFF" : "#212121"
-        }
+        resolvedBackgroundColor(for: false)
     }
 
     var titleHints: [String] {
@@ -213,5 +241,32 @@ struct ToolItem: Codable, Identifiable, Hashable {
         try container.encode(enabled, forKey: .enabled)
         try container.encodeIfPresent(theme, forKey: .theme)
         try container.encodeIfPresent(backgroundColor, forKey: .backgroundColor)
+    }
+}
+
+extension String {
+    var isLightHexColor: Bool {
+        let cleanHex = trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: cleanHex).scanHexInt64(&int)
+        let r, g, b: Double
+        switch cleanHex.count {
+        case 3:
+            r = Double(((int >> 8) & 0xF) * 17) / 255.0
+            g = Double(((int >> 4) & 0xF) * 17) / 255.0
+            b = Double((int & 0xF) * 17) / 255.0
+        case 6:
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+        case 8:
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+        default:
+            return false
+        }
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return luminance >= 0.5
     }
 }

@@ -80,6 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
 
         AccessibilityPermission.promptIfNeeded()
+
+        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("app.toolswitchrail.mac.ToggleDashboard"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.statusItemClicked(nil)
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

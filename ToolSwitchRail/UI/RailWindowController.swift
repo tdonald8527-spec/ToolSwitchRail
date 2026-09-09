@@ -15,7 +15,7 @@ final class RailWindowController: NSWindowController {
     private var visibilityAnimationGeneration: UInt = 0
     private var hostingView: NSHostingView<RailView>?
 
-    static let seamExtension: CGFloat = 0
+    static let seamExtension: CGFloat = 1
 
     init(configStore: ConfigStore, windowManager: WindowManager, statusMonitor: ToolStatusMonitor, onSelect: @escaping (ToolItem) -> Void) {
         self.configStore = configStore
@@ -31,8 +31,8 @@ final class RailWindowController: NSWindowController {
             defer: false
         )
         panel.becomesKeyOnlyIfNeeded = true
-        panel.level = .normal
-        panel.isFloatingPanel = false
+        panel.level = .floating
+        panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -117,10 +117,10 @@ final class RailWindowController: NSWindowController {
         window.alphaValue = 1
 
         if isManaged {
-            if window.level != .normal {
-                window.level = .normal
+            if window.level != .floating {
+                window.level = .floating
                 if let panel = window as? NSPanel {
-                    panel.isFloatingPanel = false
+                    panel.isFloatingPanel = true
                 }
             }
             window.orderFrontRegardless()
@@ -134,7 +134,9 @@ final class RailWindowController: NSWindowController {
 
     func orderAdjacentToTargetWindow(targetWindowID: CGWindowID? = nil) {
         guard let window else { return }
-        if let wid = targetWindowID, wid > 0 {
+        if window.level == .floating {
+            window.orderFrontRegardless()
+        } else if let wid = targetWindowID, wid > 0 {
             window.order(.above, relativeTo: Int(wid))
         } else if !window.isVisible {
             window.orderFrontRegardless()

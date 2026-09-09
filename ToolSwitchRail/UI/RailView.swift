@@ -39,25 +39,14 @@ struct RailView: View {
     }
 
     private var currentBackgroundColor: Color {
-        if isEffectiveLightMode {
-            if let tool = currentTool, tool.resolvedBackgroundColor.isLightHexColor {
-                return Color(hex: tool.resolvedBackgroundColor)
-            }
-            return Color(hex: "#F5F5F7")
-        } else {
-            if let tool = currentTool, !tool.resolvedBackgroundColor.isLightHexColor {
-                return Color(hex: tool.resolvedBackgroundColor)
-            }
-            return Color(hex: "#1E1E1E")
+        if let tool = currentTool {
+            return Color(hex: tool.resolvedBackgroundColor(for: isEffectiveLightMode))
         }
+        return isEffectiveLightMode ? Color(hex: "#F3F3F3") : Color(hex: "#1E1E1E")
     }
 
     private var controlForegroundColor: Color {
         isEffectiveLightMode ? Color(white: 0.15, opacity: 0.85) : Color(white: 0.95, opacity: 0.85)
-    }
-
-    private var dividerColor: Color {
-        isEffectiveLightMode ? Color.black.opacity(0.12) : Color.white.opacity(0.12)
     }
 
     private var dragHandleColor: Color {
@@ -71,19 +60,9 @@ struct RailView: View {
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.22), value: currentBackgroundColor)
 
-            // Subtle hairline divider between rail and target app (padded 14pt vertically to preserve corner seams)
-            HStack(spacing: 0) {
-                Spacer().frame(width: max(0, railWidth - 0.5))
-                Rectangle()
-                    .fill(dividerColor)
-                    .frame(width: 0.5)
-                    .padding(.vertical, 14)
-                Spacer(minLength: 0)
-            }
-
             VStack(spacing: 6) {
                 RailHeaderDragArea(windowManager: windowManager, isLightMode: isEffectiveLightMode)
-                    .padding(.top, 8)
+                    .padding(.top, 10)
 
                 ForEach(Array(tools.enumerated()), id: \.element.id) { index, tool in
                     let isBeingDragged = reorderManager.draggedToolID == tool.id
@@ -288,8 +267,8 @@ struct RailHeaderDragArea: View {
     var isLightMode: Bool = false
 
     var body: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 6) {
+        VStack(spacing: 7) {
+            HStack(spacing: 8) {
                 TrafficLightMinimizeButton {
                     windowManager.minimizeCurrent()
                 }
@@ -300,10 +279,10 @@ struct RailHeaderDragArea: View {
             }
 
             Capsule()
-                .fill(isLightMode ? Color.black.opacity(0.22) : Color.white.opacity(0.25))
-                .frame(width: 22, height: 3)
+                .fill(isLightMode ? Color.black.opacity(0.20) : Color.white.opacity(0.22))
+                .frame(width: 20, height: 3)
         }
-        .frame(width: 56, height: 34)
+        .frame(width: 56, height: 40)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 2)
@@ -474,32 +453,5 @@ extension Color {
             blue: Double(b) / 255,
             opacity: Double(a) / 255
         )
-    }
-}
-
-extension String {
-    var isLightHexColor: Bool {
-        let cleanHex = trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: cleanHex).scanHexInt64(&int)
-        let r, g, b: Double
-        switch cleanHex.count {
-        case 3:
-            r = Double(((int >> 8) & 0xF) * 17) / 255.0
-            g = Double(((int >> 4) & 0xF) * 17) / 255.0
-            b = Double((int & 0xF) * 17) / 255.0
-        case 6:
-            r = Double((int >> 16) & 0xFF) / 255.0
-            g = Double((int >> 8) & 0xFF) / 255.0
-            b = Double(int & 0xFF) / 255.0
-        case 8:
-            r = Double((int >> 16) & 0xFF) / 255.0
-            g = Double((int >> 8) & 0xFF) / 255.0
-            b = Double(int & 0xFF) / 255.0
-        default:
-            return false
-        }
-        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        return luminance >= 0.5
     }
 }
