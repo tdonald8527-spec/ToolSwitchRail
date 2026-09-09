@@ -78,6 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        SystemAppearanceManager.shared.$isDarkMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateStatusItemMenu()
+                guard let self else { return }
+                self.railWindowController.applyAppearance(for: self.windowManager.activeTool)
+            }
+            .store(in: &cancellables)
+
         AccessibilityPermission.promptIfNeeded()
     }
 
@@ -169,23 +178,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addItem.target = self
         menu.addItem(addItem)
 
-        let appearanceItem = NSMenuItem(title: "外观模式", action: nil, keyEquivalent: "")
+        let appearanceItem = NSMenuItem(title: "系统外观", action: nil, keyEquivalent: "")
         let appearanceMenu = NSMenu()
-        let currentMode = configStore.configuration.workspace.appearance
+        let isDark = SystemAppearanceManager.shared.isDarkMode
 
-        let systemItem = NSMenuItem(title: "跟随应用 / 系统", action: #selector(setAppearanceSystem), keyEquivalent: "")
-        systemItem.target = self
-        systemItem.state = (currentMode == .system) ? .on : .off
-        appearanceMenu.addItem(systemItem)
+        let systemAppearanceToggleItem = NSMenuItem(
+            title: isDark ? "切换为系统浅色模式" : "切换为系统深色模式",
+            action: #selector(toggleSystemAppearanceAction),
+            keyEquivalent: ""
+        )
+        systemAppearanceToggleItem.target = self
+        appearanceMenu.addItem(systemAppearanceToggleItem)
+        appearanceMenu.addItem(NSMenuItem.separator())
 
-        let darkItem = NSMenuItem(title: "深色模式", action: #selector(setAppearanceDark), keyEquivalent: "")
+        let darkItem = NSMenuItem(title: "深色模式", action: #selector(setSystemAppearanceDark), keyEquivalent: "")
         darkItem.target = self
-        darkItem.state = (currentMode == .dark) ? .on : .off
+        darkItem.state = isDark ? .on : .off
         appearanceMenu.addItem(darkItem)
 
-        let lightItem = NSMenuItem(title: "浅色模式", action: #selector(setAppearanceLight), keyEquivalent: "")
+        let lightItem = NSMenuItem(title: "浅色模式", action: #selector(setSystemAppearanceLight), keyEquivalent: "")
         lightItem.target = self
-        lightItem.state = (currentMode == .light) ? .on : .off
+        lightItem.state = !isDark ? .on : .off
         appearanceMenu.addItem(lightItem)
 
         appearanceItem.submenu = appearanceMenu
@@ -240,16 +253,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configStore.removeTool(id: tool.id)
     }
 
-    @objc private func setAppearanceSystem() {
+    @objc private func toggleSystemAppearanceAction() {
+        SystemAppearanceManager.shared.toggleSystemAppearance()
         configStore.setAppearance(.system)
     }
 
-    @objc private func setAppearanceDark() {
-        configStore.setAppearance(.dark)
+    @objc private func setSystemAppearanceDark() {
+        SystemAppearanceManager.shared.setSystemDarkMode(true)
+        configStore.setAppearance(.system)
     }
 
-    @objc private func setAppearanceLight() {
-        configStore.setAppearance(.light)
+    @objc private func setSystemAppearanceLight() {
+        SystemAppearanceManager.shared.setSystemDarkMode(false)
+        configStore.setAppearance(.system)
     }
 
     @objc private func openConfigAction() {

@@ -84,6 +84,7 @@ SWIFT_FILES=(
   "$SRC_DIR/Services/WindowTracker.swift"
   "$SRC_DIR/Services/WindowManager.swift"
   "$SRC_DIR/Services/ToolStatusMonitor.swift"
+  "$SRC_DIR/Services/SystemAppearanceManager.swift"
   "$SRC_DIR/UI/ToolIconView.swift"
   "$SRC_DIR/UI/NeedsYouPanel.swift"
   "$SRC_DIR/UI/RailView.swift"

@@ -223,12 +223,10 @@ final class RailWindowController: NSWindowController {
                 case .dark:
                     targetAppearanceName = .darkAqua
                 case .system:
-                    let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
-                    targetAppearanceName = (match == .aqua) ? .aqua : .darkAqua
+                    targetAppearanceName = SystemAppearanceManager.shared.isDarkMode ? .darkAqua : .aqua
                 }
             } else {
-                let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
-                targetAppearanceName = (match == .aqua) ? .aqua : .darkAqua
+                targetAppearanceName = SystemAppearanceManager.shared.isDarkMode ? .darkAqua : .aqua
             }
         }
 

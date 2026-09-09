@@ -6,6 +6,7 @@ struct RailView: View {
     @ObservedObject var configStore: ConfigStore
     @ObservedObject var windowManager: WindowManager
     @ObservedObject var statusMonitor: ToolStatusMonitor
+    @ObservedObject private var systemAppearance = SystemAppearanceManager.shared
     let onSelect: (ToolItem) -> Void
     @StateObject private var reorderManager = ToolReorderManager()
     @Namespace private var railNamespace
@@ -33,14 +34,7 @@ struct RailView: View {
         case .dark:
             return false
         case .system:
-            if let tool = currentTool {
-                if tool.resolvedTheme == .light { return true }
-                if tool.resolvedTheme == .dark { return false }
-            }
-            if let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) {
-                return match == .aqua
-            }
-            return false
+            return !systemAppearance.isDarkMode
         }
     }
 
@@ -246,30 +240,19 @@ struct RailView: View {
     }
 
     private var appearanceIcon: String {
-        switch configStore.configuration.workspace.appearance {
-        case .dark: return "moon.stars.fill"
-        case .light: return "sun.max.fill"
-        case .system: return "circle.lefthalf.filled"
-        }
+        systemAppearance.isDarkMode ? "moon.stars.fill" : "sun.max.fill"
     }
 
     private var appearanceHelpText: String {
-        switch configStore.configuration.workspace.appearance {
-        case .dark: return "当前外观：深色（点击切换至浅色）"
-        case .light: return "当前外观：浅色（点击切换至跟随应用）"
-        case .system: return "当前外观：跟随应用（点击切换至深色）"
-        }
+        systemAppearance.isDarkMode ? "系统外观：深色（点击切换为系统浅色）" : "系统外观：浅色（点击切换为系统深色）"
     }
 
     private func toggleAppearance() {
-        let next: AppearanceMode
-        switch configStore.configuration.workspace.appearance {
-        case .dark: next = .light
-        case .light: next = .system
-        case .system: next = .dark
-        }
-        withAnimation(.easeInOut(duration: 0.2)) {
-            configStore.setAppearance(next)
+        withAnimation(.easeInOut(duration: 0.22)) {
+            systemAppearance.toggleSystemAppearance()
+            if configStore.configuration.workspace.appearance != .system {
+                configStore.setAppearance(.system)
+            }
         }
     }
 
