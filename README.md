@@ -1,16 +1,16 @@
 # Tool Switch Rail for macOS
 
-A lightweight native macOS workspace rail for people who work across multiple AI desktop agents and assistants.
+A lightweight native macOS switching rail for people who work across multiple desktop AI agents.
 
-Tool Switch Rail keeps official apps and web-app windows in their own native environments while providing one narrow side rail for switching, positioning, status awareness, and workspace control. It is built with SwiftUI + AppKit and intentionally avoids iframe/WebView embedding, client injection, DOM modification, or patching third-party applications.
+Tool Switch Rail keeps each desktop agent in its own official native or web-app environment while providing one narrow side rail for fast switching, window positioning, status awareness, and workspace control. It is built with SwiftUI + AppKit and intentionally avoids iframe/WebView embedding, client injection, DOM modification, or patching third-party applications.
 
 > Project status: early-stage open source. The project is actively developed and currently maintained by the repository owner.
 
 ## Why this project exists
 
-AI power users increasingly work across several independent coding agents and assistants at the same time. The result is constant window switching, overlapping layouts, duplicated navigation, and poor visibility into which agent needs attention.
+AI power users increasingly work across several independent desktop agents at the same time. The result is constant window switching, overlapping layouts, duplicated navigation, and poor visibility into which agent needs attention.
 
-Tool Switch Rail provides a thin desktop coordination layer instead of creating yet another AI client:
+Tool Switch Rail provides a thin desktop switching and coordination layer instead of creating yet another AI client:
 
 - keeps third-party tools independent and updatable;
 - provides a compact 56 pt switching rail;
@@ -158,7 +158,7 @@ Tool Switch Rail is released under the [MIT License](LICENSE).
 
 ## 中文简介
 
-Tool Switch Rail 是一个原生 macOS 多 AI 工具侧边切换栏。它的目标不是重新做一套 AI 客户端，而是在 Codex、ChatGPT、Gemini、Grok、WorkBuddy、Hermes、Antigravity 等独立官方工具之间提供一个极薄的桌面协调层。
+Tool Switch Rail 是一个原生 macOS 多桌面 Agent 切换栏。它的核心用途是在 Codex、ChatGPT、Gemini、Grok、WorkBuddy、Hermes、Antigravity 等多个独立桌面 Agent 之间快速切换，并把它们的窗口统一到同一个工作区域，而不是重新做一套 AI 客户端或 Agent 平台。
 
 核心边界：
 
