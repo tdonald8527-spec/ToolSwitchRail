@@ -25,7 +25,7 @@ Tool Switch Rail provides a thin desktop switching and coordination layer instea
 - **Non-invasive** — no code injection, no modified app bundles, no patched `asar`, no DOM manipulation, no iframe embedding.
 - **Local-first** — configuration and status probes are local. The project does not upload third-party application data.
 - **Read-only agent probes** — supported probes inspect local process, heartbeat, log, SQLite, or persistence signals without modifying third-party business data.
-- **Thin coordination layer** — Tool Switch Rail is not an agent orchestrator and does not attempt to replace Codex, ChatGPT, Gemini, Grok, WorkBuddy, Hermes, Antigravity, or other tools.
+- **Thin coordination layer** — Tool Switch Rail is not an agent orchestrator and does not attempt to replace the desktop agents it works alongside.
 
 ## Current capabilities
 
@@ -47,7 +47,7 @@ Tool Switch Rail provides a thin desktop switching and coordination layer instea
 
 ### Status dashboard
 
-The menu-bar popover provides a compact dashboard and local status hints for selected desktop agents. Current probes include integrations for Antigravity, Hermes, Grok Bot, WorkBuddy, and ChatGPT/Codex when their local runtime signals are available.
+The menu-bar popover provides a compact dashboard and local status hints for selected desktop agents. Where a reliable local runtime signal is available, Tool Switch Rail can expose best-effort indicators such as running, idle, working, or needs-attention states.
 
 Status detection is deliberately conservative: it is best-effort telemetry, not an official API or guarantee of third-party application state. Probe behavior can change when third-party applications change their local persistence formats.
 
@@ -103,21 +103,17 @@ Example:
 
 ```json
 {
-  "browser": {
-    "appName": "Google Chrome",
-    "bundleIdentifier": "com.google.Chrome"
-  },
   "tools": [
     {
-      "appName": "Antigravity",
+      "appName": "Example Agent",
       "backgroundColor": "#181818",
-      "bundleIdentifier": "com.google.antigravity",
+      "bundleIdentifier": "com.example.agent",
       "enabled": true,
       "hotkeyIndex": 1,
-      "id": "antigravity",
+      "id": "example-agent",
       "kind": "app",
-      "name": "Antigravity",
-      "symbolName": "a.circle"
+      "name": "Example Agent",
+      "symbolName": "circle"
     }
   ],
   "workspace": {
@@ -158,7 +154,7 @@ Tool Switch Rail is released under the [MIT License](LICENSE).
 
 ## 中文简介
 
-Tool Switch Rail 是一个原生 macOS 多桌面 Agent 切换栏。它的核心用途是在 Codex、ChatGPT、Gemini、Grok、WorkBuddy、Hermes、Antigravity 等多个独立桌面 Agent 之间快速切换，并把它们的窗口统一到同一个工作区域，而不是重新做一套 AI 客户端或 Agent 平台。
+Tool Switch Rail 是一个原生 macOS 多桌面 Agent 切换栏。它的核心用途是在多个独立桌面 Agent 之间快速切换，并把它们的窗口统一到同一个工作区域，而不是重新做一套 AI 客户端或 Agent 平台。
 
 核心边界：
 
