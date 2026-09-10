@@ -1,121 +1,178 @@
-# Tool Switch Rail for macOS — Command Line Tools 版
+# Tool Switch Rail for macOS
 
-专为 macOS 打造的高性能多桌面 Agent 侧边切换栏工作台。
-不需要安装完整 Xcode，只要 Mac 已有 Apple Command Line Tools 和 Swift，即可通过 `./build.command` 生成可直接双击运行的原生 macOS `.app`。
+A lightweight native macOS workspace rail for people who work across multiple AI desktop agents and assistants.
 
----
+Tool Switch Rail keeps official apps and web-app windows in their own native environments while providing one narrow side rail for switching, positioning, status awareness, and workspace control. It is built with SwiftUI + AppKit and intentionally avoids iframe/WebView embedding, client injection, DOM modification, or patching third-party applications.
 
-## 你的当前环境
+> Project status: early-stage open source. The project is actively developed and currently maintained by the repository owner.
 
-已确认支持：
-- macOS Sonoma / Sequoia (Apple Silicon / arm64)
-- `/Library/Developer/CommandLineTools`
-- Apple Swift 6.4
+## Why this project exists
 
----
+AI power users increasingly work across several independent coding agents and assistants at the same time. The result is constant window switching, overlapping layouts, duplicated navigation, and poor visibility into which agent needs attention.
 
-## 快速开始
+Tool Switch Rail provides a thin desktop coordination layer instead of creating yet another AI client:
 
-1. 进入 `ToolSwitchRail` 根目录。
-2. 双击或执行 `./build.command`：
-   ```bash
-   chmod +x build.command run.command
-   ./build.command
-   ```
-3. 编译完成后在 `Dist/` 自动生成：
-   `Dist/Tool Switch Rail.app`
-4. 首次运行后，请前往：
-   `系统设置 → 隐私与安全性 → 辅助功能`
-   允许 **Tool Switch Rail**。
-5. 也可直接运行 `./run.command`：自动增量编译并启动。
+- keeps third-party tools independent and updatable;
+- provides a compact 56 pt switching rail;
+- repositions registered windows into a consistent workspace;
+- minimizes other registered windows when switching;
+- exposes lightweight local status indicators where a reliable local signal is available;
+- lets users add, remove, and reorder applications without rebuilding the app.
 
----
+## Core principles
 
-## 核心功能与架构特性
+- **Native, lightweight macOS utility** — SwiftUI + AppKit, no Electron runtime.
+- **Non-invasive** — no code injection, no modified app bundles, no patched `asar`, no DOM manipulation, no iframe embedding.
+- **Local-first** — configuration and status probes are local. The project does not upload third-party application data.
+- **Read-only agent probes** — supported probes inspect local process, heartbeat, log, SQLite, or persistence signals without modifying third-party business data.
+- **Thin coordination layer** — Tool Switch Rail is not an agent orchestrator and does not attempt to replace Codex, ChatGPT, Gemini, Grok, WorkBuddy, Hermes, Antigravity, or other tools.
 
-### 1. 原生无缝大窗口融合
-- **极轻量原生架构**：采用纯原生 **SwiftUI + AppKit** 构建，杜绝 Electron 内存与性能开销。
-- **视觉无缝拼合**：Rail 宽度约 56px，采用 `.floating` 浮动窗口层级并向右延伸 1px 无缝贴合，彻底移除发丝分割线，使侧栏与官方客户端在视觉上融为一体。
-- **动态色彩联动**：内置各应用（Antigravity、ChatGPT、Hermes、Grok Bot、WorkBuddy 等）专属浅色与深色背景色，随激活工具与外观模式毫秒级自适应。
-- **窗口吸附与协同**：移动或调整右侧主窗口时，左轨自动吸附跟随；切换工具时新窗口自动归位至同一 content frame，并将其他登记窗口自动最小化。
+## Current capabilities
 
-### 2. 系统级外观无感秒切
-- **SkyLight 底层 C API**：内置 `SLSSetAppearanceThemeLegacy` 底层调用，**无需任何 AppleScript 权限弹窗**，一键实现 macOS 全局深色/浅色模式实时切换，并即时同步更新 Rail 材质与工具配色。
+### Native workspace rail
 
-### 3. 原生状态栏 Popover 运行看板
-- **2 列紧凑网格（2-Column Grid）**：顶部状态栏点击即可展开原生毛玻璃 Popover 看板，卡片布局紧凑规范。
-- **系统快捷控制**：集成系统深浅外观切换、侧边栏显示/最小化快捷卡片。
-- **多入口应用管理**：底部直接提供 `+ 添加应用` 与显式的 `— 移除应用 ⌵` 下拉菜单。
+- Approx. 56 pt floating side rail.
+- Registered app windows snap to the same content frame.
+- Moving/resizing the active window keeps the rail aligned.
+- Optional minimization of other registered windows when switching.
+- Per-tool light/dark background matching.
 
-### 4. 桌面 Agent 深度非侵入式状态监控
-全生命周期监测 5 大主流桌面 Agent，严格通过只读本地心跳、日志、SQLite 与持久化文件监测状态，**不注入、不修改官方代码**：
-- **Antigravity**：监控会话 steps SQLite 与 annotations `.pbtxt`，实时识别执行中/空闲与最新会话标题。
-- **Hermes**：只读 `state.db` 中的 session turn lease 租约与 token 用量，实时识别 working / idle。
-- **Grok Bot**：监测 `sand-session-marker.json` 存活心跳与 PID，纯 Swift Base32 解码本地持久化文件，提取当前助手（如「投资台」）并实时监控流式输出。
-- **WorkBuddy**：监控 `~/.workbuddy/sessions/` 心跳、`artifact-index` 产出成果，结合工作区日志 `runId != (none)` 与确认事件实时判定。
-- **ChatGPT (Mac)**：监控 `com.openai.codex` 进程与今日会话日志流式生成。
-- **全局运行兜底**：任何运行中的应用均可靠显示 `.idle` 实心就绪点，杜绝死灰色未知状态。
+### App management
 
-### 5. 灵活的应用增删与重排
-- **添加应用**：点击底部的 `+` 按钮，通过原生 macOS 文件选择器自由选取 `/Applications` 下的任意 `.app`。
-- **多通道移除应用**：
-  1. **Rail 图标右键**：直接右键任意图标弹出「从 Rail 移除」。
-  2. **状态栏看板一键移除**：点击看板底部 `— 移除应用 ⌵` 下拉菜单，单机任意项即刻删除。
-  3. **看板卡片右键**：右键任意 Agent 卡片弹出「从 Rail 移除」。
-  4. **齿轮设置菜单**：点击 Rail 底部设置齿轮，在「从 Rail 移除应用」子菜单中直接选择删除。
-- **拖拽重排**：长按并纵向拖动 Rail 图标，平滑交互式重排应用顺序并持久化。
+- Add any macOS `.app` through the native file picker.
+- Remove apps from the rail, dashboard, or settings menu.
+- Drag to reorder apps and persist the order.
+- Keyboard switching with `Cmd + Option + 1...9`.
+- Show/minimize Tool Switch Rail with `Cmd + Option + M`.
 
----
+### Status dashboard
 
-## 快捷键
+The menu-bar popover provides a compact dashboard and local status hints for selected desktop agents. Current probes include integrations for Antigravity, Hermes, Grok Bot, WorkBuddy, and ChatGPT/Codex when their local runtime signals are available.
 
-- `Cmd + Option + 1...9`：快速切换至对应序号的桌面工具。
-- `Cmd + Option + M`：显示 / 最小化 Tool Switch Rail。
+Status detection is deliberately conservative: it is best-effort telemetry, not an official API or guarantee of third-party application state. Probe behavior can change when third-party applications change their local persistence formats.
 
----
+### Appearance control
 
-## 配置文件
+Tool Switch Rail can switch macOS appearance and update the rail presentation immediately. This functionality uses macOS system interfaces and may require maintenance as macOS evolves.
 
-配置文件位于：
-`~/Library/Application Support/ToolSwitchRail/config.json`
+## Requirements
 
-支持约 1 秒文件监听热重载，在 Rail 底部齿轮菜单中可直接点击「打开配置文件」进行高级定制。
+Currently tested with:
+
+- macOS Sonoma / Sequoia
+- Apple Silicon (`arm64`)
+- Apple Command Line Tools
+- Swift 6.4
+
+The project can be built without installing the full Xcode application when the required Apple Command Line Tools and Swift toolchain are available.
+
+## Build and run
+
+```bash
+chmod +x build.command run.command
+./build.command
+```
+
+The build script generates:
+
+```text
+Dist/Tool Switch Rail.app
+```
+
+On first launch, macOS may require Accessibility permission so the app can coordinate third-party application windows:
+
+`System Settings → Privacy & Security → Accessibility → Tool Switch Rail`
+
+For incremental build + launch:
+
+```bash
+./run.command
+```
+
+## Configuration
+
+Runtime configuration is stored at:
+
+```text
+~/Library/Application Support/ToolSwitchRail/config.json
+```
+
+A sample configuration is available in [`config.example.json`](config.example.json).
+
+Example:
 
 ```json
 {
-  "browser" : {
-    "appName" : "Google Chrome",
-    "bundleIdentifier" : "com.google.Chrome"
+  "browser": {
+    "appName": "Google Chrome",
+    "bundleIdentifier": "com.google.Chrome"
   },
-  "tools" : [
+  "tools": [
     {
-      "appName" : "Antigravity",
-      "backgroundColor" : "#181818",
-      "bundleIdentifier" : "com.google.antigravity",
-      "enabled" : true,
-      "hotkeyIndex" : 1,
-      "id" : "antigravity",
-      "kind" : "app",
-      "name" : "Antigravity",
-      "symbolName" : "a.circle"
+      "appName": "Antigravity",
+      "backgroundColor": "#181818",
+      "bundleIdentifier": "com.google.antigravity",
+      "enabled": true,
+      "hotkeyIndex": 1,
+      "id": "antigravity",
+      "kind": "app",
+      "name": "Antigravity",
+      "symbolName": "a.circle"
     }
   ],
-  "workspace" : {
-    "appearance" : "system",
-    "heightFraction" : 0.82,
-    "minimizeOtherRegisteredWindows" : true,
-    "minimumHeight" : 680,
-    "minimumWidth" : 960,
-    "railWidth" : 56,
-    "widthFraction" : 0.84
+  "workspace": {
+    "appearance": "system",
+    "heightFraction": 0.82,
+    "minimizeOtherRegisteredWindows": true,
+    "minimumHeight": 680,
+    "minimumWidth": 960,
+    "railWidth": 56,
+    "widthFraction": 0.84
   }
 }
 ```
 
+The configuration file supports hot reload while Tool Switch Rail is running.
+
+## Privacy and third-party applications
+
+Tool Switch Rail is not affiliated with or endorsed by the developers of the third-party applications it can launch or observe.
+
+The rail does not require users to provide third-party API keys for ordinary window switching. Optional status integrations rely on locally available runtime signals and are read-only by design. Users should review the source and local permissions before enabling integrations that inspect application state.
+
+## Contributing
+
+Bug reports, compatibility findings, probe improvements, documentation fixes, and focused pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Because several integrations depend on undocumented local runtime formats, please include the application version and macOS version when reporting a status-detection problem. Do not attach private chat content, credentials, tokens, or complete personal log files.
+
+## Security
+
+Please see [`SECURITY.md`](SECURITY.md) before reporting a security issue. Do not publish credentials, private logs, or exploit details in a public issue.
+
+## License
+
+Tool Switch Rail is released under the [MIT License](LICENSE).
+
 ---
 
-## 明确设计原则
+## 中文简介
 
-- **绝不篡改官方应用**：不注入官方客户端、不破解 asar、不修改 DOM、不嵌入 iframe。
-- **零安全与更新冲突**：官方客户端正常自动更新升级，绝不影响 Tool Switch Rail 的吸附与调度。
-- **纯本地只读探测**：数据监控仅读取官方落地的本地会话与日志，不上报、不修改业务数据。
+Tool Switch Rail 是一个原生 macOS 多 AI 工具侧边切换栏。它的目标不是重新做一套 AI 客户端，而是在 Codex、ChatGPT、Gemini、Grok、WorkBuddy、Hermes、Antigravity 等独立官方工具之间提供一个极薄的桌面协调层。
+
+核心边界：
+
+- 不嵌入第三方网页或客户端；
+- 不修改第三方应用包、DOM 或内部代码；
+- 不接管 Agent 自己的任务拆解和调度；
+- 状态探测只读取本地可用信号，并按 best-effort 方式工作；
+- 保留各工具自己的账号、更新机制、权限和官方界面。
+
+快速开始：
+
+```bash
+chmod +x build.command run.command
+./build.command
+```
+
+编译后会在 `Dist/` 生成 `Tool Switch Rail.app`。首次运行如需窗口协同，请在 macOS“隐私与安全性 → 辅助功能”中授权。
