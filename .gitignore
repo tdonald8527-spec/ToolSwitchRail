@@ -6,3 +6,17 @@ xcuserdata/
 Dist/
 *.app
 build/
+
+# Local secrets / credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+auth.json
+credentials.json
+secrets.json
+config.local.json
