@@ -39,7 +39,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>
     <string>ToolSwitchRail</string>
     <key>CFBundleIdentifier</key>
-    <string>com.donald.toolswitchrail</string>
+    <string>app.toolswitchrail.mac</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -114,7 +114,7 @@ xcrun swiftc \
 chmod +x "$EXECUTABLE"
 
 echo "[4/5] 本地签名与代码需求绑定..."
-/usr/bin/codesign --force --deep -s - -r="designated => identifier \"com.donald.toolswitchrail\"" "$APP_DIR" >/dev/null
+/usr/bin/codesign --force --deep -s - -r="designated => identifier \"app.toolswitchrail.mac\"" "$APP_DIR" >/dev/null
 
 echo "[5/5] 安装并同步至 /Applications 与 桌面快捷打开图标..."
 APPLICATIONS_TARGET="/Applications/$APP_NAME.app"
