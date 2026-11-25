@@ -32,6 +32,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         return nil
     }
 
+    var currentTargetPID: pid_t? { windowTracker.currentApp?.processIdentifier }
+
     var currentTargetWindowID: CGWindowID? {
         guard let win = windowTracker.currentWindow else { return nil }
         return Self.windowID(for: win)
@@ -1742,9 +1744,39 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     /// clamped it, that real frame becomes the workspace frame.
     @discardableResult
     private func adoptActualFrame(of window: AXUIElement, requested: CGRect) -> CGRect {
-        let actual = windowFrame(window) ?? requested
-        canonicalStackFrame = actual
-        return actual
+        // Electron apps apply a frame asynchronously, so reading it back immediately often
+        // returns the OLD frame. Adopting that stale value moved the rail to the old spot and
+        // made the next tool land there too (tools out of line with each other).
+        // So: commit to the requested frame now, and only after the app has settled check
+        // whether it really refused (e.g. a larger minimum size) — then adopt what it chose.
+        canonicalStackFrame = requested
+        let generation = switchGeneration
+        let windowID = Self.windowID(for: window)
+
+        // Idle polling is 1.5 s (CPU budget). Right after a switch the window may still be
+        // settling (unhide, Electron restore) without sending an AX notification, which left
+        // the rail visibly off for up to 1.5 s. A short burst of checks covers that window.
+        for delay: UInt64 in [60_000_000, 160_000_000, 320_000_000, 600_000_000] {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: delay)
+                guard let self, self.switchGeneration == generation, !self.isMinimized,
+                      let windowID, self.currentTargetWindowID == windowID,
+                      !self.windowTracker.isMouseDragging else { return }
+                self.windowTracker.checkWindowFrame(force: true)
+            }
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard let self, self.switchGeneration == generation, !self.isMinimized,
+                  let windowID, self.currentTargetWindowID == windowID,
+                  !self.windowTracker.isMouseDragging,
+                  let actual = self.currentTargetGeometry()?.frame else { return }
+            let refused = abs(actual.width - requested.width) > 2 || abs(actual.height - requested.height) > 2
+            guard refused else { return }
+            self.canonicalStackFrame = actual
+            self.moveRail(alongside: actual, railWidth: CGFloat(self.configStore.configuration.workspace.railWidth))
+        }
+        return requested
     }
 
     private func moveRail(alongside frame: CGRect, railWidth: CGFloat) {

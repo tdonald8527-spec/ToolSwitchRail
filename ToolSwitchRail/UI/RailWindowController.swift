@@ -32,8 +32,10 @@ final class RailWindowController: NSWindowController {
             defer: false
         )
         panel.becomesKeyOnlyIfNeeded = true
-        panel.level = .floating
-        panel.isFloatingPanel = true
+        // Normal window level (2026-11-25): the rail belongs to the workspace, not above
+        // every app. Other apps the user switches to cover it like any other window.
+        panel.level = .normal
+        panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -124,23 +126,35 @@ final class RailWindowController: NSWindowController {
             }
         }
 
-        if window.level != .floating {
-            window.level = .floating
+        if window.level != .normal {
+            window.level = .normal
             if let panel = window as? NSPanel {
-                panel.isFloatingPanel = true
+                panel.isFloatingPanel = false
             }
         }
-        window.orderFrontRegardless()
+        if isManaged {
+            // A rail tool is in front: bring the rail up with it.
+            window.orderFrontRegardless()
+        } else if !window.isVisible {
+            // Another app is in front: stay visible but keep our place in the stack, so
+            // that app's windows cover the rail instead of the rail covering them.
+            window.orderBack(nil)
+        }
     }
 
     func orderAdjacentToTargetWindow(targetWindowID: CGWindowID? = nil) {
         guard let window else { return }
-        if window.level == .floating {
+        let trackedPID = windowManager.currentTargetPID
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if trackedPID != nil, trackedPID == frontPID {
+            // The rail's own tool is active: sit on top, next to it.
             window.orderFrontRegardless()
         } else if let wid = targetWindowID, wid > 0 {
+            // Otherwise stay directly above the tool's window only, below whatever the
+            // user is working in.
             window.order(.above, relativeTo: Int(wid))
         } else if !window.isVisible {
-            window.orderFrontRegardless()
+            window.orderBack(nil)
         }
     }
 

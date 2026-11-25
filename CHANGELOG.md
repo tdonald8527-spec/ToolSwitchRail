@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-11-25
+
+- Fixed tools landing out of line after a switch: the workspace frame is no longer read back immediately after placing a window (Electron apps apply frames asynchronously, so the read returned the old position). The requested frame is kept; the actual frame is adopted only if the app really refused it after settling.
+- The rail catches up right after a switch (short burst of position checks) instead of waiting for the 1.5 s idle poll.
+- The rail no longer covers other apps: it is now a normal-level window that sits on top only while one of its tools is in front, and goes behind whatever other app you switch to while staying visible.
+
 ## 0.4.0 — 2026-11-25
 
 ### Stability

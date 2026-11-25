@@ -31,7 +31,7 @@ Tool Switch Rail provides a thin desktop switching and coordination layer instea
 
 ### Native workspace rail
 
-- Approx. 56 pt floating side rail that stays visible while you use other apps.
+- Approx. 56 pt side rail that stays visible while you use other apps, without covering them: it is on top only while one of its tools is in front.
 - Switching shows exactly one tool: the selected app is placed in the workspace and the other registered apps are hidden (`workspace.minimizeOtherRegisteredWindows`, on by default).
 - The rail is positioned from the window's **actual** frame after placement, so it never covers an app that refused a size or position.
 - Moving/resizing the active window keeps the rail aligned; only your own drags/resizes change where the next tool is placed.
