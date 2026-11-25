@@ -65,8 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 self?.registerHotKeys()
                 guard let self else { return }
-                let geometry = self.windowManager.workspaceGeometry()
-                self.railWindowController.move(to: geometry.rail)
+                // Config edits (remove / undo / add / reorder) must not move the rail: keep it
+                // next to the current window. Only fall back to the default slot when there is
+                // no window to sit next to. (Previously it jumped to the centred default and
+                // back on every edit.)
+                self.windowManager.realignRailToCurrentWindow()
                 self.railWindowController.applyAppearance(for: self.windowManager.activeTool)
             }
             .store(in: &cancellables)

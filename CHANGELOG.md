@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2 — 2026-11-26
+
+- Fixed the window occasionally shifting on a switch: rail adjacency no longer runs on app activation, where it could read a window still restoring after unhide and adopt that transient frame as the workspace frame. It now reacts only to a real user move/resize.
+- Fixed the rail jumping when an app is removed, restored, added or reordered: configuration changes keep the rail next to the current window instead of sending it to the default centred slot and back.
+
 ## 0.4.1 — 2026-11-25
 
 - Fixed tools landing out of line after a switch: the workspace frame is no longer read back immediately after placing a window (Electron apps apply frames asynchronously, so the read returned the old position). The requested frame is kept; the actual frame is adopted only if the app really refused it after settling.

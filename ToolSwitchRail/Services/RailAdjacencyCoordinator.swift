@@ -43,17 +43,11 @@ final class RailAdjacencyCoordinator {
     }
 
     private func installObservers() {
-        let center = NSWorkspace.shared.notificationCenter
-        let activation = center.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.scheduleEnforcement()
-            }
-        }
-        workspaceObservers.append(activation)
+        // 2026-11-25: no longer reacts to app activation. Enforcing on activation read the
+        // window while it was still restoring (unhide / Electron saved frame) and wrote that
+        // transient frame into the workspace frame, so the window visibly jumped on some
+        // switches. Placement on switch belongs to WindowManager alone; this coordinator now
+        // only reacts to a real user move/resize (mouse-up after the frame changed).
 
         let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp]
         let handleEvent: (NSEvent) -> Void = { [weak self] event in

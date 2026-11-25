@@ -1270,6 +1270,16 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         lastLiveStackFrame = nil
     }
 
+    func realignRailToCurrentWindow() {
+        let railWidth = CGFloat(configStore.configuration.workspace.railWidth)
+        windowTracker.updateRailWidth(railWidth)
+        if let frame = currentTargetGeometry()?.frame ?? canonicalStackFrame {
+            moveRail(alongside: frame, railWidth: railWidth)
+        } else {
+            railWindowController?.move(to: workspaceGeometry().rail)
+        }
+    }
+
     func workspaceGeometry() -> (rail: CGRect, content: CGRect) {
         let cfg = configStore.configuration.workspace
         let screen = screenContainingRail() ?? NSScreen.main ?? NSScreen.screens.first!
