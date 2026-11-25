@@ -49,9 +49,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
+    <string>0.4.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -91,7 +91,9 @@ SWIFT_FILES=(
   "$SRC_DIR/Services/WindowTracker.swift"
   "$SRC_DIR/Services/WindowManager.swift"
   "$SRC_DIR/Services/ToolStatusMonitor.swift"
+  "$SRC_DIR/Services/ToolUnreadProbe.swift"
   "$SRC_DIR/Services/SystemAppearanceManager.swift"
+  "$SRC_DIR/UI/Experience.swift"
   "$SRC_DIR/UI/ToolIconView.swift"
   "$SRC_DIR/UI/NeedsYouPanel.swift"
   "$SRC_DIR/UI/RailView.swift"
@@ -114,34 +116,13 @@ xcrun swiftc \
 chmod +x "$EXECUTABLE"
 
 echo "[4/5] 本地签名与代码需求绑定..."
-/usr/bin/codesign --force --deep -s - -r="designated => identifier \"app.toolswitchrail.mac\"" "$APP_DIR" >/dev/null
-
-echo "[5/5] 安装并同步至 /Applications 与 桌面快捷打开图标..."
-APPLICATIONS_TARGET="/Applications/$APP_NAME.app"
-rm -rf "$APPLICATIONS_TARGET"
-cp -R "$APP_DIR" "$APPLICATIONS_TARGET"
-touch "$APPLICATIONS_TARGET"
-
-DESKTOP_DIR="$HOME/Desktop"
-if [ -d "$DESKTOP_DIR" ]; then
-  osascript -e "tell application \"Finder\"
-    set appFile to POSIX file \"$APPLICATIONS_TARGET\"
-    set deskFolder to POSIX file \"$DESKTOP_DIR\"
-    if exists alias file \"$APP_NAME\" of folder deskFolder then
-      delete alias file \"$APP_NAME\" of folder deskFolder
-    end if
-    make alias file to appFile at folder deskFolder
-  end tell" >/dev/null 2>&1 || true
-  touch "$DESKTOP_DIR/$APP_NAME" 2>/dev/null || true
-fi
-
-echo "生成位置："
-echo "  - 构建目录: $APP_DIR"
-echo "  - 应用程序: $APPLICATIONS_TARGET"
-echo "  - 桌面快速打开: $DESKTOP_DIR/$APP_NAME"
-echo ""
-echo "首次运行后，请到："
-echo "系统设置 → 隐私与安全性 → 辅助功能"
-echo "允许 Tool Switch Rail。"
-echo ""
+TMP_BUILD="/private/tmp/ToolSwitchRail-Dist"
+rm -rf "$TMP_BUILD"
+mkdir -p "$TMP_BUILD"
+cp -R "$APP_DIR" "$TMP_BUILD/"
+/usr/bin/xattr -cr "$TMP_BUILD/$APP_NAME.app"
+/usr/bin/codesign --force --deep -s - -r="designated => identifier \"app.toolswitchrail.mac\"" "$TMP_BUILD/$APP_NAME.app" >/dev/null
+rm -rf "$APP_DIR"
+cp -R "$TMP_BUILD/$APP_NAME.app" "$DIST_DIR/"
+rm -rf "$TMP_BUILD"
 

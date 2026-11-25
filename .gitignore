@@ -20,3 +20,6 @@ auth.json
 credentials.json
 secrets.json
 config.local.json
+
+# local build logs
+*.log

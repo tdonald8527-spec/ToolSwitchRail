@@ -105,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
             button.target = self
             button.action = #selector(statusItemClicked(_:))
+            // Deliver right-clicks too, otherwise the right-click menu can never open.
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         let pop = NSPopover()
@@ -119,7 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         pop.contentViewController = NSHostingController(rootView: dashboard)
-        pop.contentSize = NSSize(width: 320, height: 400)
+        // Let SwiftUI size the popover to the actual number of application rows.
+        pop.contentSize = pop.contentViewController!.view.fittingSize
         self.popover = pop
     }
 
@@ -128,8 +131,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let isRightClick = (NSApp.currentEvent?.type == .rightMouseUp)
 
         if isRightClick {
+            // Same settings menu as the rail gear and the dashboard gear.
             popover?.performClose(nil)
-            showQuickContextMenu(for: button)
+            windowManager.buildSettingsMenu()
+                .popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
             return
         }
 
@@ -139,6 +144,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 popover.contentViewController?.view.window?.makeKey()
+                // Start without auto-focusing the first action; Tab still navigates controls.
+                popover.contentViewController?.view.window?.makeFirstResponder(nil)
             }
         }
     }

@@ -37,6 +37,22 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         return Self.windowID(for: win)
     }
 
+    // Read actual geometry, not the canonical slot (which can lead or lag a drag).
+    // A missing window is unknown; callers must not infer movement from cached data.
+    func currentTargetGeometry() -> (windowID: CGWindowID, frame: CGRect)? {
+        guard let windowID = currentTargetWindowID,
+              let windows = CGWindowListCopyWindowInfo([.optionIncludingWindow, .excludeDesktopElements], windowID) as? [[String: Any]],
+              let info = windows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+              let x = bounds["X"] as? NSNumber, let y = bounds["Y"] as? NSNumber,
+              let width = bounds["Width"] as? NSNumber, let height = bounds["Height"] as? NSNumber,
+              width.doubleValue > 50, height.doubleValue > 50 else { return nil }
+        let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.main?.frame.height ?? 1080
+        return (windowID, CGRect(x: x.doubleValue, y: primaryHeight - y.doubleValue - height.doubleValue,
+                                width: width.doubleValue, height: height.doubleValue))
+    }
+
     private let configStore: ConfigStore
     private let windowTracker: WindowTracker
     weak var railWindowController: RailWindowController?
@@ -53,6 +69,8 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     private var pendingActivationTask: Task<Void, Never>?
     private var pendingHideTask: Task<Void, Never>?
     private var minimumVerificationTask: Task<Void, Never>?
+    private var switchGeneration: UInt = 0
+    private var pendingSwitchTask: Task<Void, Never>?
     private var isSwitchingTool = false
     private var ignoreActivationUntil = Date.distantPast
     private var workspaceScanTimer: Timer?
@@ -73,6 +91,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             return
         }
         if #available(macOS 14.0, *) {
+            NSApp.yieldActivation(to: app)
             app.activate()
         } else {
             app.activate(options: .activateIgnoringOtherApps)
@@ -92,88 +111,107 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         railWindowController?.restorePriorFrontmostApp()
     }
 
+    /// The single settings menu. Opened from the rail gear, the dashboard gear and a
+    /// right-click on the menu-bar icon — same items, same words, everywhere.
     func showSettingsMenu(from point: NSPoint? = nil) {
         prepareForKeyInteraction()
+        let menu = buildSettingsMenu()
+        let popLocation = point ?? NSEvent.mouseLocation
+        menu.popUp(positioning: nil, at: popLocation, in: nil)
+        restorePriorFrontmostApp()
+    }
 
+    func buildSettingsMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
-        let minItem = NSMenuItem(title: "最小化 (Cmd+Option+M)", action: #selector(menuActionMinimize), keyEquivalent: "m")
-        minItem.keyEquivalentModifierMask = [.command, .option]
-        minItem.target = self
-        menu.addItem(minItem)
+        // Only shown when something is actually wrong.
+        if !AccessibilityPermission.isTrusted {
+            let axItem = NSMenuItem(title: "⚠︎ 需要辅助功能权限才能对齐窗口…", action: #selector(menuActionCheckAX), keyEquivalent: "")
+            axItem.target = self
+            menu.addItem(axItem)
+            menu.addItem(NSMenuItem.separator())
+        }
 
-        let zoomItem = NSMenuItem(title: "最大化 / 还原", action: #selector(menuActionToggleMaximize), keyEquivalent: "")
+        let collapseItem = NSMenuItem(
+            title: isMinimized ? "显示工作区" : "收起工作区",
+            action: #selector(menuActionToggleCollapse),
+            keyEquivalent: "m"
+        )
+        collapseItem.keyEquivalentModifierMask = [.command, .option]
+        collapseItem.target = self
+        menu.addItem(collapseItem)
+
+        let zoomItem = NSMenuItem(
+            title: isMaximized ? "还原窗口大小" : "铺满屏幕",
+            action: #selector(menuActionToggleMaximize),
+            keyEquivalent: ""
+        )
         zoomItem.target = self
+        zoomItem.isEnabled = !isMinimized
         menu.addItem(zoomItem)
 
-        let presetMenu = NSMenu()
-        let p1 = NSMenuItem(title: "紧凑 (960 × 680)", action: #selector(menuActionPreset1), keyEquivalent: "")
-        p1.target = self
-        presetMenu.addItem(p1)
-        let p2 = NSMenuItem(title: "标准 (1100 × 750)", action: #selector(menuActionPreset2), keyEquivalent: "")
-        p2.target = self
-        presetMenu.addItem(p2)
-        let p3 = NSMenuItem(title: "大屏 (1400 × 900)", action: #selector(menuActionPreset3), keyEquivalent: "")
-        p3.target = self
-        presetMenu.addItem(p3)
-        presetMenu.addItem(NSMenuItem.separator())
-        let pReset = NSMenuItem(title: "重置为居中默认尺寸", action: #selector(menuActionResetDefault), keyEquivalent: "")
-        pReset.target = self
-        presetMenu.addItem(pReset)
-
-        let presetItem = NSMenuItem(title: "窗口预设尺寸", action: nil, keyEquivalent: "")
-        presetItem.submenu = presetMenu
-        menu.addItem(presetItem)
+        let sizeMenu = NSMenu()
+        sizeMenu.autoenablesItems = false
+        for (title, selector) in [
+            ("紧凑（960 × 680）", #selector(menuActionPreset1)),
+            ("标准（1100 × 750）", #selector(menuActionPreset2)),
+            ("宽屏（1400 × 900）", #selector(menuActionPreset3))
+        ] {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            item.target = self
+            sizeMenu.addItem(item)
+        }
+        sizeMenu.addItem(NSMenuItem.separator())
+        let resetItem = NSMenuItem(title: "恢复默认位置", action: #selector(menuActionResetDefault), keyEquivalent: "")
+        resetItem.target = self
+        sizeMenu.addItem(resetItem)
+        let sizeParent = NSMenuItem(title: "窗口尺寸", action: nil, keyEquivalent: "")
+        sizeParent.submenu = sizeMenu
+        sizeParent.isEnabled = !isMinimized
+        menu.addItem(sizeParent)
 
         menu.addItem(NSMenuItem.separator())
 
-        let openCfg = NSMenuItem(title: "打开配置文件", action: #selector(menuActionOpenConfig), keyEquivalent: "")
-        openCfg.target = self
-        menu.addItem(openCfg)
+        let addItem = NSMenuItem(title: "添加应用…", action: #selector(menuActionAddApp), keyEquivalent: "")
+        addItem.target = self
+        menu.addItem(addItem)
 
-        let revealCfg = NSMenuItem(title: "在 Finder 中显示", action: #selector(menuActionRevealConfig), keyEquivalent: "")
-        revealCfg.target = self
-        menu.addItem(revealCfg)
-
-        let reloadCfg = NSMenuItem(title: "重新载入配置", action: #selector(menuActionReloadConfig), keyEquivalent: "")
-        reloadCfg.target = self
-        menu.addItem(reloadCfg)
-
-        let removeSubmenu = NSMenu()
         let currentTools = configStore.configuration.tools
-        for tool in currentTools {
-            let item = NSMenuItem(title: "移除 \(tool.name)", action: #selector(menuActionRemoveTool(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = tool.id
-            removeSubmenu.addItem(item)
-        }
         if !currentTools.isEmpty {
-            let removeParent = NSMenuItem(title: "从 Rail 移除应用", action: nil, keyEquivalent: "")
-            removeParent.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
-            removeParent.submenu = removeSubmenu
+            let removeMenu = NSMenu()
+            for tool in currentTools {
+                let item = NSMenuItem(title: tool.name, action: #selector(menuActionRemoveTool(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = tool.id
+                removeMenu.addItem(item)
+            }
+            let removeParent = NSMenuItem(title: "从 Rail 移除", action: nil, keyEquivalent: "")
+            removeParent.submenu = removeMenu
             menu.addItem(removeParent)
         }
 
         menu.addItem(NSMenuItem.separator())
 
-        let axStatusTitle = AccessibilityPermission.isTrusted ? "辅助功能权限：已开启 (正常)" : "⚠️ 辅助功能权限：未开启 (点击修复)"
-        let axItem = NSMenuItem(title: axStatusTitle, action: #selector(menuActionCheckAX), keyEquivalent: "")
-        axItem.target = self
-        menu.addItem(axItem)
+        // Option-key alternate: reveal the file instead of opening it.
+        let openCfg = NSMenuItem(title: "打开配置文件", action: #selector(menuActionOpenConfig), keyEquivalent: "")
+        openCfg.target = self
+        menu.addItem(openCfg)
+        let revealCfg = NSMenuItem(title: "在访达中显示配置文件", action: #selector(menuActionRevealConfig), keyEquivalent: "")
+        revealCfg.target = self
+        revealCfg.keyEquivalentModifierMask = [.option]
+        revealCfg.isAlternate = true
+        menu.addItem(revealCfg)
 
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "退出 Tool Switch Rail", action: #selector(menuActionQuit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-
-        let popLocation = point ?? NSEvent.mouseLocation
-        menu.popUp(positioning: nil, at: popLocation, in: nil)
-
-        restorePriorFrontmostApp()
+        return menu
     }
 
-    @objc private func menuActionMinimize() { minimizeCurrent() }
+    @objc private func menuActionToggleCollapse() { toggleMinimize() }
     @objc private func menuActionToggleMaximize() { toggleMaximize() }
     @objc private func menuActionPreset1() { resizeToPreset(width: 1016, height: 680) }
     @objc private func menuActionPreset2() { resizeToPreset(width: 1156, height: 750) }
@@ -181,17 +219,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     @objc private func menuActionResetDefault() { resetToDefaultGeometry() }
     @objc private func menuActionOpenConfig() { configStore.openConfigFile() }
     @objc private func menuActionRevealConfig() { configStore.revealConfigFile() }
-    @objc private func menuActionReloadConfig() { configStore.reload() }
+    @objc private func menuActionAddApp() { RailActions.addApp(configStore: configStore, windowManager: self) }
     @objc private func menuActionRemoveTool(_ sender: NSMenuItem) {
         guard let toolID = sender.representedObject as? String else { return }
-        configStore.removeTool(id: toolID)
+        RailActions.removeTool(id: toolID, configStore: configStore)
     }
-    @objc private func menuActionCheckAX() {
-        AccessibilityPermission.promptIfNeeded()
-        if !AccessibilityPermission.isTrusted {
-            AccessibilityPermission.showPermissionAlert()
-        }
-    }
+    @objc private func menuActionCheckAX() { RailActions.openAccessibilitySettings() }
     @objc private func menuActionQuit() { NSApp.terminate(nil) }
 
     init(configStore: ConfigStore) {
@@ -224,7 +257,11 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             object: nil
         )
 
-        let scan = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+        // A busy Electron app must not freeze the rail: cap every synchronous AX call
+        // (the system default is ~6 s) for this process.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+
+        let scan = Timer(timeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.scanForExternalMinimize()
             }
@@ -356,8 +393,22 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     @objc private func handleAppActivation(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return }
-        if Date() < ignoreActivationUntil { return }
-        if isSwitchingTool { return }
+        // Workspace notifications can arrive after a newer activation. Only the
+        // application that is actually frontmost may change the current intent.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return }
+        if isSwitchingTool {
+            if let tool = activeTool,
+               runningApplications(for: tool).contains(where: { $0.processIdentifier == app.processIdentifier }) {
+                return // Activation caused by our current switch; focus already owns it.
+            }
+            // A Dock/Cmd-Tab/window click takes precedence over a pending launch or
+            // settle delay. Do not let the old request take the foreground back.
+            cancelPendingSwitchWork()
+            ignoreActivationUntil = .distantPast
+        } else {
+            if Date() < ignoreActivationUntil { return }
+            cancelPendingSwitchWork()
+        }
 
         if isMinimized {
             if let tool = registeredTool(for: app) {
@@ -428,7 +479,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
             pendingActivationTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 let startTime = Date()
-                let timeout: TimeInterval = 8.0
+                let timeout: TimeInterval = 15.0
                 while Date().timeIntervalSince(startTime) < timeout {
                     try? await Task.sleep(nanoseconds: 80_000_000)
                     if Task.isCancelled { return }
@@ -459,6 +510,18 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         // Chrome and other general browsers must NEVER be managed or attached to the rail.
         // Managed web tools run as dedicated standalone Web Apps (PWAs).
         return false
+    }
+
+    /// The general-purpose browser from config (Chrome by default). It can hold many
+    /// unrelated windows, so the rail must never hide, move or resize it as a whole.
+    /// Chrome/Safari web-app (PWA) processes have their own bundle IDs and are not affected.
+    private func isConfiguredBrowser(_ app: NSRunningApplication) -> Bool {
+        let browser = configStore.configuration.browser
+        if let id = browser.bundleIdentifier, !id.isEmpty,
+           app.bundleIdentifier?.caseInsensitiveCompare(id) == .orderedSame {
+            return true
+        }
+        return app.localizedName?.localizedCaseInsensitiveCompare(browser.appName) == .orderedSame
     }
 
     private func hasZeroVisibleWindows(_ app: NSRunningApplication) -> Bool {
@@ -561,6 +624,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         case "wps-lingxi", "wpslingxi", "lingxi":
             return ["com.wps.lingxi", "com.kingsoft.wpsoffice.lingxi"]
         case "grok-web", "grok", "gemini-web", "gemini", "chatgpt-web":
+            // Web apps (PWAs) have machine-specific bundle IDs: set them in config.json.
             if let explicit = tool.bundleIdentifier, !explicit.isEmpty {
                 return [explicit]
             }
@@ -635,7 +699,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         guard let tool = registeredTool(for: app) else { return false }
         let windows = standardWindows(for: app, tool: tool)
-        if let window = preferredWindow(from: windows) {
+        if let window = preferredWindow(from: windows, app: app) {
             return attachToWindow(window, app: app, tool: tool)
         }
         return false
@@ -643,6 +707,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
     @discardableResult
     private func attachToWindow(_ window: AXUIElement, app: NSRunningApplication, tool: ToolItem) -> Bool {
+        let generation = switchGeneration
         let wasHidden = app.isHidden
         let wasMinimized = boolAttribute(window, kAXMinimizedAttribute as CFString)
         if wasHidden || wasMinimized {
@@ -664,7 +729,6 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         if wasHidden {
             setAppHidden(app, false)
-            app.unhide()
         }
         if wasMinimized {
             setMinimized(window, false)
@@ -674,28 +738,26 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         // during deminiaturization/unhide.
         setFrame(window, nsFrame: effectiveFrame)
 
-        canonicalStackFrame = effectiveFrame
+        // The rail follows where the window actually ended up, not where it was asked to
+        // go. Apps that refuse a size/position otherwise leave the rail over their content.
+        let placedFrame = adoptActualFrame(of: window, requested: effectiveFrame)
         windowTracker.startTracking(app: app, window: window, tool: tool)
-
-        let railFrame = CGRect(
-            x: effectiveFrame.minX - railWidth,
-            y: effectiveFrame.minY,
-            width: railWidth,
-            height: effectiveFrame.height
-        )
-        railWindowController?.move(to: railFrame)
+        moveRail(alongside: placedFrame, railWidth: railWidth)
 
         let targetWid = Self.windowID(for: window)
         let sameApp = windowTracker.currentApp?.processIdentifier == app.processIdentifier
         bringWindowToFront(window, app: app, forceActivate: !sameApp)
         orderAdjacentToTargetWindow(targetWindowID: targetWid)
-        stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: window)
+        hideOtherRegisteredApps(except: tool, activeApp: app)
 
         if wasMinimized || wasHidden {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 120_000_000)
-                guard let self else { return }
-                self.setFrame(window, nsFrame: effectiveFrame)
+                guard let self, self.switchGeneration == generation,
+                      !self.isMinimized, self.selectedToolID == tool.id,
+                      self.currentTargetWindowID == targetWid,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return }
+                self.setFrame(window, nsFrame: self.canonicalStackFrame ?? effectiveFrame)
                 self.bringWindowToFront(window, app: app, forceActivate: false)
                 self.windowTracker.checkWindowFrame(force: true)
                 self.orderAdjacentToTargetWindow(targetWindowID: targetWid)
@@ -720,27 +782,64 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         return nil
     }
 
+    private func cancelPendingSwitchWork() {
+        switchGeneration &+= 1
+        minimumVerificationTask?.cancel()
+        minimumVerificationTask = nil
+        pendingSwitchTask?.cancel()
+        pendingSwitchTask = nil
+        pendingActivationTask?.cancel()
+        pendingActivationTask = nil
+        pendingHideTask?.cancel()
+        pendingHideTask = nil
+        isSwitchingTool = false
+        launchingToolID = nil
+    }
+
+    private func reconcileFrontmostApplication() {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        handleAppActivation(Notification(
+            name: NSWorkspace.didActivateApplicationNotification,
+            userInfo: [NSWorkspace.applicationUserInfoKey: app]
+        ))
+    }
+
+    private func scheduleSwitchCompletion(generation: UInt) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.switchGeneration == generation else { return }
+            self.isSwitchingTool = false
+            // Also recover if the system coalesced/delayed an activation notification.
+            self.reconcileFrontmostApplication()
+        }
+    }
+
     func switchTo(_ tool: ToolItem) {
         guard tool.enabled else { return }
         NSLog("[ToolSwitchRail] switchTo requested: %@", tool.name)
 
         guard AccessibilityPermission.isTrusted else {
             NSLog("[ToolSwitchRail] Accessibility permission NOT trusted! Prompting alert.")
-            AccessibilityPermission.promptIfNeeded()
-            AccessibilityPermission.showPermissionAlert()
-            lastError = "未获得辅助功能权限。如系统设置中已开启，请先关闭再重新开启以刷新签名。"
+            // Never a blocking dialog: a quiet hint with a direct way to fix it.
+            ToastCenter.shared.show("需要辅助功能权限才能对齐窗口", actionTitle: "去设置") {
+                RailActions.openAccessibilitySettings()
+            }
             return
         }
 
-        pendingHideTask?.cancel()
-        pendingHideTask = nil
+        cancelPendingSwitchWork()
+        let generation = switchGeneration
 
         if selectedToolID == tool.id,
+           windowTracker.currentTool?.id == tool.id,
            let curWin = windowTracker.currentWindow,
            let curApp = windowTracker.currentApp,
+           !curApp.isHidden, !isMinimized,
            !boolAttribute(curWin, kAXMinimizedAttribute as CFString) {
             activateApp(curApp)
             AXUIElementPerformAction(curWin, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(curWin, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(curWin, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            railWindowController?.setFloatingForManagedTool(true)
             return
         }
 
@@ -755,14 +854,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         let targetContentFrame = self.activeContentFrame ?? self.workspaceGeometry().content
 
-        // 1. FAST PATH: Window already exists -> Switch synchronously and instantaneously (<5ms)
+        // 1. Existing window: place and activate without waiting for a launch.
         if let match = self.findWindow(for: tool) {
             NSLog("[ToolSwitchRail] Found existing window for %@ (instant switch)", tool.name)
             isSwitchingTool = true
             self.focus(match, contentFrame: targetContentFrame, tool: tool)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.isSwitchingTool = false
-            }
+            scheduleSwitchCompletion(generation: generation)
             return
         }
 
@@ -771,26 +868,41 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         isSwitchingTool = true
         launchingToolID = tool.id
 
-        Task { [weak self] in
+        pendingSwitchTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var focusedWindow = false
             defer {
-                Task { @MainActor [weak self] in
-                    self?.isSwitchingTool = false
-                    self?.launchingToolID = nil
+                if self.switchGeneration == generation {
+                    self.pendingSwitchTask = nil
+                    self.launchingToolID = nil
+                    if !focusedWindow {
+                        self.isSwitchingTool = false
+                        self.reconcileFrontmostApplication()
+                    }
                 }
             }
             do {
                 NSLog("[ToolSwitchRail] Launching tool: %@", tool.name)
                 try self.launch(tool)
-                if let match = await self.waitForWindow(for: tool, timeout: 7.0) {
+                if let match = await self.waitForWindow(for: tool, timeout: 15.0) {
+                    guard !Task.isCancelled, self.switchGeneration == generation else { return }
                     NSLog("[ToolSwitchRail] Window appeared after launch for %@", tool.name)
                     self.focus(match, contentFrame: targetContentFrame, tool: tool)
+                    focusedWindow = true
+                    self.scheduleSwitchCompletion(generation: generation)
                 } else {
-                    self.lastError = "已启动 \(tool.name)，但暂时没有找到匹配窗口。请检查 config.json 里的 appName / bundleId / windowTitleMatch。"
+                    guard !Task.isCancelled, self.switchGeneration == generation else { return }
+                    self.lastError = "没找到 \(tool.name) 的窗口"
+                    ToastCenter.shared.show("没找到「\(tool.name)」的窗口", actionTitle: "重试") { [weak self] in
+                        self?.switchTo(tool)
+                    }
                     NSLog("[ToolSwitchRail] Error: %@", self.lastError ?? "")
                 }
             } catch {
                 self.lastError = error.localizedDescription
+                ToastCenter.shared.show("打不开「\(tool.name)」", actionTitle: "重试") { [weak self] in
+                    self?.switchTo(tool)
+                }
                 NSLog("[ToolSwitchRail] Catch error: %@", self.lastError ?? "")
             }
         }
@@ -799,6 +911,12 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     // MARK: - Minimize / Restore
 
     func minimizeAll() {
+        switchGeneration &+= 1
+        minimumVerificationTask?.cancel()
+        pendingSwitchTask?.cancel()
+        pendingSwitchTask = nil
+        isSwitchingTool = false
+        launchingToolID = nil
         if isMinimized { return }
         isMinimized = true
         ignoreActivationUntil = Date().addingTimeInterval(2.0)
@@ -823,6 +941,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 let appName = (app.localizedName ?? "").lowercased()
                 let bundleID = (app.bundleIdentifier ?? "").lowercased()
                 if appName.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
+                if isConfiguredBrowser(app) { continue }
 
                 if isBrowserApplication(app) {
                     for win in standardWindows(for: app, tool: tool) {
@@ -1278,6 +1397,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     private func waitForWindow(for tool: ToolItem, timeout: TimeInterval) async -> WindowMatch? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            guard !Task.isCancelled else { return nil }
             if let match = findWindow(for: tool) {
                 return match
             }
@@ -1292,7 +1412,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         let apps = runningApplications(for: tool)
         for app in apps {
             let windows = standardWindows(for: app, tool: tool)
-            if let window = preferredWindow(from: windows) {
+            if let window = preferredWindow(from: windows, app: app) {
                 return WindowMatch(app: app, window: window)
             }
         }
@@ -1360,22 +1480,15 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 }
             }
 
-            if let bundleID = configStore.configuration.browser.bundleIdentifier,
-               !bundleID.isEmpty {
-                apps.append(contentsOf: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID))
-            }
-            if apps.isEmpty {
-                let browserName = configStore.configuration.browser.appName
-                apps.append(contentsOf: workspace.runningApplications.filter {
-                    $0.localizedName?.localizedCaseInsensitiveCompare(browserName) == .orderedSame
-                })
-            }
+            // Web tools are managed only as standalone web-app (PWA) processes. The general
+            // browser is never part of a tool, otherwise unrelated Chrome windows whose title
+            // contains "Gemini"/"Grok" get moved, resized or hidden.
 
             let hints = tool.titleHints
             for app in workspace.runningApplications {
                 if apps.contains(where: { $0.processIdentifier == app.processIdentifier }) { continue }
                 if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue }
-                if isBrowserApplication(app) { continue }
+                if isBrowserApplication(app) || isConfiguredBrowser(app) { continue }
                 if let registered = registeredTool(for: app), registered.id != tool.id { continue }
 
                 let name = app.localizedName ?? ""
@@ -1518,6 +1631,23 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         return validWindows
     }
 
+    /// The window the user is actually looking at (the app's focused window) wins over
+    /// "main"; with several windows the rail otherwise tracks a window that is not visible.
+    private func preferredWindow(from windows: [AXUIElement], app: NSRunningApplication) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var focused: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+           let focused,
+           CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            let focusedWindow = focused as! AXUIElement
+            if let match = windows.first(where: { CFEqual($0, focusedWindow) }),
+               !boolAttribute(match, kAXMinimizedAttribute as CFString) {
+                return match
+            }
+        }
+        return preferredWindow(from: windows)
+    }
+
     private func preferredWindow(from windows: [AXUIElement]) -> AXUIElement? {
         if let mainWin = windows.first(where: { boolAttribute($0, kAXMainAttribute as CFString) && !boolAttribute($0, kAXMinimizedAttribute as CFString) }) {
             return mainWin
@@ -1529,6 +1659,7 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     }
 
     private func focus(_ match: WindowMatch, contentFrame: CGRect, tool: ToolItem) {
+        let generation = switchGeneration
         let wasHidden = match.app.isHidden
         let wasMinimized = boolAttribute(match.window, kAXMinimizedAttribute as CFString)
         if wasHidden || wasMinimized {
@@ -1548,36 +1679,32 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
 
         if wasHidden {
             setAppHidden(match.app, false)
-            match.app.unhide()
         }
         if wasMinimized {
             setMinimized(match.window, false)
         }
         setFrame(match.window, nsFrame: effectiveFrame)
 
-        let railFrame = CGRect(
-            x: effectiveFrame.minX - railWidth,
-            y: effectiveFrame.minY,
-            width: railWidth,
-            height: effectiveFrame.height
-        )
-        railWindowController?.move(to: railFrame)
+        let placedFrame = adoptActualFrame(of: match.window, requested: effectiveFrame)
+        moveRail(alongside: placedFrame, railWidth: railWidth)
 
         let targetWindowID = Self.windowID(for: match.window)
         let sameApp = windowTracker.currentApp?.processIdentifier == match.app.processIdentifier
 
-        canonicalStackFrame = effectiveFrame
         windowTracker.startTracking(app: match.app, window: match.window, tool: tool)
 
         bringWindowToFront(match.window, app: match.app, forceActivate: !sameApp)
         orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
-        stackRegisteredWindows(onto: effectiveFrame, activeTool: tool, activeWindow: match.window)
+        hideOtherRegisteredApps(except: tool, activeApp: match.app)
 
         if wasMinimized || wasHidden {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 120_000_000)
-                guard let self else { return }
-                self.setFrame(match.window, nsFrame: effectiveFrame)
+                guard let self, self.switchGeneration == generation,
+                      !self.isMinimized, self.selectedToolID == tool.id,
+                      self.currentTargetWindowID == targetWindowID,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == match.app.processIdentifier else { return }
+                self.setFrame(match.window, nsFrame: self.canonicalStackFrame ?? effectiveFrame)
                 self.bringWindowToFront(match.window, app: match.app, forceActivate: false)
                 self.windowTracker.checkWindowFrame(force: true)
                 self.orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
@@ -1585,9 +1712,50 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         }
     }
 
-    private func hideOtherRegisteredApps(except activeTool: ToolItem) {
-        let frame = activeContentFrame ?? workspaceGeometry().content
-        stackRegisteredWindows(onto: frame, activeTool: activeTool, activeWindow: windowTracker.currentWindow)
+    /// Switching shows exactly one tool. Other registered native apps are hidden as whole
+    /// processes (no Dock animation, nothing peeking out behind the active window).
+    /// Controlled by workspace.minimizeOtherRegisteredWindows (previously read nowhere).
+    /// The general browser, RustDesk and this app are never touched.
+    private func hideOtherRegisteredApps(except activeTool: ToolItem, activeApp: NSRunningApplication) {
+        guard configStore.configuration.workspace.minimizeOtherRegisteredWindows else {
+            let frame = activeContentFrame ?? workspaceGeometry().content
+            stackRegisteredWindows(onto: frame, activeTool: activeTool, activeWindow: windowTracker.currentWindow)
+            return
+        }
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        var seen = Set<pid_t>()
+        for tool in configStore.configuration.tools where tool.enabled && tool.id != activeTool.id {
+            for app in runningApplications(for: tool) {
+                let pid = app.processIdentifier
+                if pid == selfPID || pid == activeApp.processIdentifier { continue }
+                if !seen.insert(pid).inserted { continue }
+                if isConfiguredBrowser(app) || isBrowserApplication(app) { continue }
+                let name = (app.localizedName ?? "").lowercased()
+                let bundleID = (app.bundleIdentifier ?? "").lowercased()
+                if name.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
+                setAppHidden(app, true)
+            }
+        }
+    }
+
+    /// Reads the window's real frame after a placement request. If the app refused or
+    /// clamped it, that real frame becomes the workspace frame.
+    @discardableResult
+    private func adoptActualFrame(of window: AXUIElement, requested: CGRect) -> CGRect {
+        let actual = windowFrame(window) ?? requested
+        canonicalStackFrame = actual
+        return actual
+    }
+
+    private func moveRail(alongside frame: CGRect, railWidth: CGFloat) {
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) ?? NSScreen.main ?? NSScreen.screens.first
+        let minX = screen?.visibleFrame.minX ?? (frame.minX - railWidth)
+        railWindowController?.move(to: CGRect(
+            x: max(frame.minX - railWidth, minX),
+            y: frame.minY,
+            width: railWidth,
+            height: frame.height
+        ))
     }
 
     private func allStandardWindows(for app: NSRunningApplication) -> [AXUIElement] {
@@ -1630,6 +1798,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         activeWindow: AXUIElement?,
         force: Bool = false
     ) {
+        // Hide-others mode (default): there are no visible siblings to align. Writing their
+        // frames anyway made background apps jump and the stack grow ("learned minimum").
+        if configStore.configuration.workspace.minimizeOtherRegisteredWindows { return }
         guard !isMinimized else { return }
         guard frame.width > 80, frame.height > 80 else { return }
 
@@ -1675,6 +1846,9 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
     }
 
     private func stackRegisteredWindows(onto frame: CGRect, activeTool: ToolItem, activeWindow: AXUIElement?, verify: Bool = false) {
+        // Hide-others mode (default): there are no visible siblings to align. Writing their
+        // frames anyway made background apps jump and the stack grow ("learned minimum").
+        if configStore.configuration.workspace.minimizeOtherRegisteredWindows { return }
         guard !isMinimized else { return }
         guard frame.width > 80, frame.height > 80 else { return }
 
@@ -1753,9 +1927,20 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
         activeWindow: AXUIElement?
     ) {
         minimumVerificationTask?.cancel()
+        let generation = switchGeneration
         minimumVerificationTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 120_000_000)
-            guard let self, !Task.isCancelled else { return }
+            guard let self, !Task.isCancelled,
+                  self.switchGeneration == generation,
+                  !self.isMinimized,
+                  self.selectedToolID == activeTool.id,
+                  let activeWindow,
+                  let currentWindow = self.windowTracker.currentWindow,
+                  CFEqual(activeWindow, currentWindow),
+                  let currentApp = self.windowTracker.currentApp,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == currentApp.processIdentifier,
+                  !self.windowTracker.isRailDragging,
+                  !self.windowTracker.isMouseDragging else { return }
 
             var learnedSomething = false
             for target in targets {
@@ -2029,16 +2214,22 @@ final class WindowManager: ObservableObject, WindowTrackerDelegate {
                 width: railWidth,
                 height: targetFrame.height
             )
-            canonicalStackFrame = targetFrame
             railWindowController?.move(to: adjustedRailFrame)
         } else {
-            canonicalStackFrame = targetFrame
             railWindowController?.move(to: railFrame)
+        }
+
+        // The rail always follows the live window. The workspace frame used for the NEXT
+        // switch is only learned from user gestures (mouse drag/resize, finalised in
+        // windowTrackerDidSettle). An app restoring its own saved frame must not silently
+        // redefine where every other tool is placed.
+        if tracker.isMouseDragging {
+            canonicalStackFrame = targetFrame
         }
 
         // Keep every already-visible sibling under the foreground window while the
         // user moves/resizes the active app. This removes the old-position "ghost".
-        if tracker.isMouseDragging,
+        if tracker.isMouseDragging, tracker.lastUpdateChangedGeometry,
            let tool = tracker.currentTool,
            let target = tracker.currentWindow {
             liveSyncBackgroundWindows(to: targetFrame, activeTool: tool, activeWindow: target)

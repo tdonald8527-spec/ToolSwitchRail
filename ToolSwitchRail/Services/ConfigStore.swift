@@ -67,11 +67,26 @@ final class ConfigStore: ObservableObject {
         save()
     }
 
-    func removeTool(id: String) {
+    /// Removes a tool and returns it with its position, so the removal can be undone.
+    @discardableResult
+    func removeTool(id: String) -> (tool: ToolItem, index: Int)? {
         var updated = configuration.tools
-        guard let index = updated.firstIndex(where: { $0.id == id }) else { return }
-        updated.remove(at: index)
+        guard let index = updated.firstIndex(where: { $0.id == id }) else { return nil }
+        let removed = updated.remove(at: index)
+        applyTools(updated)
+        return (removed, index)
+    }
 
+    /// Puts a removed tool back at its original position (undo).
+    func restoreTool(_ tool: ToolItem, at index: Int) {
+        var updated = configuration.tools
+        guard !updated.contains(where: { $0.id == tool.id }) else { return }
+        updated.insert(tool, at: min(max(0, index), updated.count))
+        applyTools(updated)
+    }
+
+    private func applyTools(_ tools: [ToolItem]) {
+        var updated = tools
         // Reassign hotkeyIndex 1...N for enabled tools
         var counter = 1
         for i in 0..<updated.count {

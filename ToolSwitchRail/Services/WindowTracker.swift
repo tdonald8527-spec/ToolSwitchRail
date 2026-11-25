@@ -33,6 +33,7 @@ final class WindowTracker {
     private var mouseButtonsDown = false
     private var lastDragCheckTime: TimeInterval = 0
     private var trackedWindowFrameChangedDuringMouseInteraction = false
+    private(set) var lastUpdateChangedGeometry = false
 
     // Native minimize has a visible system animation. Do not let the workspace react
     // until that animation has settled, otherwise app.hide()/restore notifications can
@@ -158,7 +159,7 @@ final class WindowTracker {
 
     private func startPolling() {
         pollTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.checkWindowFrame(force: false)
             }
@@ -250,7 +251,7 @@ final class WindowTracker {
     }
 
     private func handleNotification(element: AXUIElement, notification: CFString) {
-        guard isTracking else { return }
+        guard isTracking, let currentWindow, CFEqual(element, currentWindow) else { return }
 
         if notification == kAXMovedNotification as CFString || notification == kAXResizedNotification as CFString {
             checkWindowFrame(force: true)
@@ -261,8 +262,9 @@ final class WindowTracker {
             checkWindowFrame(force: true)
             delegate?.windowTrackerDidDeminimizeTarget(self)
         } else if notification == kAXUIElementDestroyedNotification as CFString {
-            delegate?.windowTrackerDidDestroyTarget(self)
+            // The delegate may immediately attach a replacement; never stop it afterwards.
             stopTracking(keepLastFrame: false)
+            delegate?.windowTrackerDidDestroyTarget(self)
         }
     }
 
@@ -301,6 +303,7 @@ final class WindowTracker {
     }
 
     func checkWindowFrame(force: Bool = false) {
+        lastUpdateChangedGeometry = false
         if isRailDragging && !force { return }
         guard let window = currentWindow else { return }
 
@@ -313,7 +316,7 @@ final class WindowTracker {
             if !mouseButtonsDown {
                 var minVal: CFTypeRef?
                 let minErr = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minVal)
-                if minErr == .invalidUIElement || minErr == .cannotComplete {
+                if minErr == .invalidUIElement {
                     delegate?.windowTrackerDidDestroyTarget(self)
                     return
                 }
@@ -367,6 +370,7 @@ final class WindowTracker {
         )
 
         let frameChanged = !framesClose(nsTargetFrame, lastTargetFrame)
+        lastUpdateChangedGeometry = frameChanged
         if mouseButtonsDown && frameChanged {
             trackedWindowFrameChangedDuringMouseInteraction = true
         }

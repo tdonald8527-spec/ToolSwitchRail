@@ -58,7 +58,7 @@ struct RailView: View {
             // Adaptive Solid Background matching the active tool (fills full width including 16pt flange)
             currentBackgroundColor
                 .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.22), value: currentBackgroundColor)
+                .animation(Motion.fade, value: currentBackgroundColor)
 
             VStack(spacing: 6) {
                 RailHeaderDragArea(windowManager: windowManager, isLightMode: isEffectiveLightMode)
@@ -78,11 +78,10 @@ struct RailView: View {
                         isOpen: windowManager.openToolIDs.contains(tool.id),
                         status: statusMonitor.snapshot(for: tool.id).status,
                         usageText: statusMonitor.snapshot(for: tool.id).usageText,
+                        hasUnread: statusMonitor.unreadToolIDs.contains(tool.id),
                         namespace: railNamespace,
                         onRemove: {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                                configStore.removeTool(id: tool.id)
-                            }
+                            RailActions.removeTool(id: tool.id, configStore: configStore)
                         },
                         onActivate: {
                             onSelect(tool)
@@ -94,8 +93,11 @@ struct RailView: View {
                         )
                         .scaleEffect(isBeingDragged ? 1.08 : 1.0)
                         .shadow(color: isBeingDragged ? Color.black.opacity(0.3) : Color.clear, radius: 8, x: 0, y: 4)
+                        // Lift on pick-up / settle on drop, quickly; the dragged item itself tracks the pointer 1:1.
+                        .animation(Motion.quick, value: isBeingDragged)
                         .offset(y: itemOffset)
-                        .animation(isBeingDragged ? nil : .spring(response: 0.25, dampingFraction: 0.8), value: itemOffset)
+                        .animation(isBeingDragged ? nil : Motion.standard, value: itemOffset)
+                        .transition(Motion.appear)
                         .zIndex(isBeingDragged ? 100 : 0)
                         .contentShape(Rectangle())
                         .onHover { isHovering in
@@ -109,25 +111,28 @@ struct RailView: View {
                                 }
                             }
                         }
-                        .onTapGesture {
-                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                onSelect(tool)
-                            }
-                        }
-                        .simultaneousGesture(
-                            DragGesture(minimumDistance: 6)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
                                 .onChanged { value in
-                                    let dy = value.translation.height
-                                    if !reorderManager.isDragging {
-                                        reorderManager.beginDrag(toolID: tool.id, index: index)
+                                    if reorderManager.pressedToolID != tool.id {
+                                        reorderManager.pressedToolID = tool.id
                                     }
-                                    reorderManager.updateDrag(translationY: dy, totalCount: tools.count)
+                                    let dy = value.translation.height
+                                    if abs(dy) >= 6 || reorderManager.isDragging {
+                                        if !reorderManager.isDragging {
+                                            reorderManager.beginDrag(toolID: tool.id, index: index)
+                                        }
+                                        reorderManager.updateDrag(translationY: dy, totalCount: tools.count)
+                                    }
                                 }
-                                .onEnded { _ in
+                                .onEnded { value in
+                                    reorderManager.pressedToolID = nil
                                     if reorderManager.isDragging {
-                                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                        withAnimation(Motion.standard) {
                                             reorderManager.endDrag(tools: tools, configStore: configStore)
                                         }
+                                    } else if abs(value.translation.width) < 12 && abs(value.translation.height) < 12 {
+                                        onSelect(tool)
                                     }
                                 }
                         )
@@ -139,11 +144,9 @@ struct RailView: View {
                             }
                             Divider()
                             Button(role: .destructive) {
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                                    configStore.removeTool(id: tool.id)
-                                }
+                                RailActions.removeTool(id: tool.id, configStore: configStore)
                             } label: {
-                                Label("从 Rail 移除", systemImage: "trash")
+                                Label("从 Rail 移除", systemImage: "minus.circle")
                             }
                         }
                 }
@@ -160,43 +163,14 @@ struct RailView: View {
                             }
                     )
 
-                // Refined bottom control capsule
+                // Bottom controls: add an app, settings. (Appearance follows macOS automatically.)
                 VStack(spacing: 2) {
-                    Button {
-                        selectAndAddApp()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(controlForegroundColor)
-                            .frame(width: 36, height: 28)
-                            .contentShape(Rectangle())
+                    RailControlButton(systemName: "plus", help: "添加应用", color: controlForegroundColor, isLightMode: isEffectiveLightMode) {
+                        RailActions.addApp(configStore: configStore, windowManager: windowManager)
                     }
-                    .buttonStyle(.plain)
-                    .help("添加应用 (.app)")
-
-                    Button {
-                        toggleAppearance()
-                    } label: {
-                        Image(systemName: appearanceIcon)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(controlForegroundColor)
-                            .frame(width: 36, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(appearanceHelpText)
-
-                    Button {
+                    RailControlButton(systemName: "gearshape", help: "设置", color: controlForegroundColor, isLightMode: isEffectiveLightMode) {
                         windowManager.showSettingsMenu()
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(controlForegroundColor)
-                            .frame(width: 36, height: 28)
-                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .help("设置与配置文件")
                 }
                 .padding(.vertical, 4)
                 .background(
@@ -222,59 +196,15 @@ struct RailView: View {
             }
             .frame(width: railWidth)
             .padding(.horizontal, 0)
-            .animation(.spring(response: 0.22, dampingFraction: 0.82), value: windowManager.selectedToolID)
-
-            if let error = windowManager.lastError {
-                VStack {
-                    Spacer()
-                    Text(error)
-                        .font(.system(size: 10))
-                        .multilineTextAlignment(.center)
-                        .padding(6)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .padding(4)
-                        .onTapGesture { windowManager.lastError = nil }
-                }
-            }
+            // Selection moves the highlight from the old icon to the new one; adding or
+            // removing a tool lets the others slide into place.
+            .animation(Motion.standard, value: windowManager.selectedToolID)
+            .animation(Motion.standard, value: tools.map(\.id))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(isEffectiveLightMode ? .light : .dark)
     }
 
-    private var appearanceIcon: String {
-        systemAppearance.isDarkMode ? "moon.stars.fill" : "sun.max.fill"
-    }
-
-    private var appearanceHelpText: String {
-        systemAppearance.isDarkMode ? "系统外观：深色（点击切换为系统浅色）" : "系统外观：浅色（点击切换为系统深色）"
-    }
-
-    private func toggleAppearance() {
-        withAnimation(.easeInOut(duration: 0.22)) {
-            systemAppearance.toggleSystemAppearance()
-            if configStore.configuration.workspace.appearance != .system {
-                configStore.setAppearance(.system)
-            }
-        }
-    }
-
-    private func selectAndAddApp() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = [.application]
-        panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        panel.prompt = "添加至 Rail"
-        panel.message = "请选择要添加到 Tool Switch Rail 的应用程序 (.app)"
-        if panel.runModal() == .OK, let url = panel.url {
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                if let tool = configStore.addTool(fromAppURL: url) {
-                    windowManager.switchTo(tool)
-                }
-            }
-        }
-    }
 }
 
 struct RailHeaderDragArea: View {
@@ -283,21 +213,24 @@ struct RailHeaderDragArea: View {
 
     var body: some View {
         VStack(spacing: 7) {
-            HStack(spacing: 8) {
-                TrafficLightMinimizeButton {
-                    windowManager.minimizeCurrent()
-                }
-
-                TrafficLightZoomButton {
-                    windowManager.toggleMaximize()
-                }
+            // One clearly labelled action instead of window-style traffic lights:
+            // it acts on the whole workspace, not on this strip.
+            RailControlButton(
+                systemName: "chevron.down",
+                help: "收起工作区（⌥⌘M）",
+                color: isLightMode ? Color(white: 0.15, opacity: 0.85) : Color(white: 0.95, opacity: 0.85),
+                isLightMode: isLightMode
+            ) {
+                windowManager.minimizeCurrent()
             }
 
+            // Drag handle: drag here to move the workspace.
             Capsule()
                 .fill(isLightMode ? Color.black.opacity(0.20) : Color.white.opacity(0.22))
                 .frame(width: 20, height: 3)
+                .help("拖动以移动工作区")
         }
-        .frame(width: 56, height: 40)
+        .frame(width: 56, height: 46)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 2)
@@ -308,61 +241,53 @@ struct RailHeaderDragArea: View {
                     windowManager.endRailDrag()
                 }
         )
-        .onTapGesture(count: 2) {
-            windowManager.toggleMaximize()
-        }
     }
 }
 
-struct TrafficLightMinimizeButton: View {
+/// Small rail control: press feedback, hover highlight, tooltip — identical everywhere.
+struct RailControlButton: View {
+    let systemName: String
+    let help: String
+    var color: Color
+    var isLightMode: Bool
     let action: () -> Void
+    // @StateObject rather than @State: this project builds with the Command Line Tools,
+    // which ship without the SwiftUI macro plugin that @State now requires.
+    @StateObject private var hover = HoverState()
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(Color(red: 0.99, green: 0.74, blue: 0.18))
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Circle()
-                            .stroke(Color(red: 0.88, green: 0.62, blue: 0.11), lineWidth: 0.5)
-                    )
-
-                Image(systemName: "minus")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(Color.black.opacity(0.55))
-            }
-            .frame(width: 16, height: 16)
-            .contentShape(Circle())
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 36, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(hover.isHovered ? (isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)) : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help("最小化 (Cmd+Option+M)")
+        .buttonStyle(RailPressStyle())
+        .onHover { hovering in
+            withAnimation(Motion.fade) { hover.isHovered = hovering }
+        }
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
-struct TrafficLightZoomButton: View {
-    let action: () -> Void
+@MainActor
+final class HoverState: ObservableObject {
+    @Published var isHovered = false
+}
 
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(Color(red: 0.16, green: 0.79, blue: 0.25))
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Circle()
-                            .stroke(Color(red: 0.12, green: 0.65, blue: 0.20), lineWidth: 0.5)
-                    )
-
-                Image(systemName: "plus")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(Color.black.opacity(0.55))
-            }
-            .frame(width: 16, height: 16)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help("最大化 / 还原")
+/// Press feedback shared by rail controls.
+struct RailPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .opacity(configuration.isPressed ? 0.75 : 1.0)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 

@@ -8,6 +8,7 @@ final class ToolStatusMonitor: ObservableObject {
     @Published private(set) var snapshots: [String: ToolStatusSnapshot] = [:]
     @Published private(set) var needsYouItems: [NeedsYouItem] = []
     @Published private(set) var quotaReports: [AgentQuotaItem] = []
+    @Published private(set) var unreadToolIDs: Set<String> = []
 
     private let configStore: ConfigStore
     private var timer: Timer?
@@ -16,7 +17,7 @@ final class ToolStatusMonitor: ObservableObject {
     init(configStore: ConfigStore) {
         self.configStore = configStore
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -44,12 +45,15 @@ final class ToolStatusMonitor: ObservableObject {
                 next[tool.id] = StatusProbe.readSnapshot(for: tool)
             }
             let items = StatusProbe.needsYouItems(from: next, tools: tools)
-            let reports = StatusProbe.readQuotaReports()
+            let reports = StatusProbe.readQuotaReports(snapshots: next)
+            // 2026-11-25: unread red dots removed at the user's request. The unread probe
+            // (third-party SQLite/local storage reads every 5 s) no longer runs at all.
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.snapshots = next
                 self.needsYouItems = items
                 self.quotaReports = reports
+                self.unreadToolIDs = []
                 self.isRefreshing = false
             }
         }
@@ -77,7 +81,7 @@ private enum StatusProbe {
             }
     }
 
-    static func readQuotaReports() -> [AgentQuotaItem] {
+    static func readQuotaReports(snapshots: [String: ToolStatusSnapshot] = [:]) -> [AgentQuotaItem] {
         var reports: [AgentQuotaItem] = []
         if let hermes = HermesStatusSource.readQuotaItem() {
             reports.append(hermes)
@@ -88,10 +92,12 @@ private enum StatusProbe {
         if let grok = GrokBotStatusSource.readQuotaItem() {
             reports.append(grok)
         }
-        if let wb = WorkBuddyStatusSource.readQuotaItem() {
+        let wbSnap = snapshots["workbuddy"] ?? snapshots["mac"] ?? snapshots["work-buddy"]
+        if let wb = WorkBuddyStatusSource.readQuotaItem(snapshot: wbSnap) {
             reports.append(wb)
         }
-        if let gpt = ChatGPTStatusSource.readQuotaItem() {
+        let gptSnap = snapshots["codex"] ?? snapshots["chatgpt"]
+        if let gpt = ChatGPTStatusSource.readQuotaItem(snapshot: gptSnap) {
             reports.append(gpt)
         }
         return reports
@@ -691,6 +697,11 @@ private enum WorkBuddyStatusSource {
             return nil
         }
 
+        // If WorkBuddy is not currently running, avoid reading disk sessions/logs
+        guard isRunningApp else {
+            return ToolStatusSnapshot(toolID: toolID, status: .idle, taskTitle: nil, usageText: nil, sourceReliable: true)
+        }
+
         var isAlive = isRunningApp
         let nowMs = Date().timeIntervalSince1970 * 1000
 
@@ -799,7 +810,7 @@ private enum WorkBuddyStatusSource {
         )
     }
 
-    static func readQuotaItem() -> AgentQuotaItem? {
+    static func readQuotaItem(snapshot: ToolStatusSnapshot? = nil) -> AgentQuotaItem? {
         let wbDir = NSHomeDirectory() + "/.workbuddy"
         let sessDir = wbDir + "/sessions"
         let fm = FileManager.default
@@ -818,7 +829,8 @@ private enum WorkBuddyStatusSource {
         }
 
         var sub: [String] = []
-        if let snap = read(toolID: "workbuddy"), let title = snap.taskTitle {
+        let snap = snapshot ?? read(toolID: "workbuddy")
+        if let snap, let title = snap.taskTitle {
             sub.append("最近产出: \(title)")
         } else {
             sub.append("就绪在线")
@@ -915,9 +927,10 @@ private enum ChatGPTStatusSource {
         )
     }
 
-    static func readQuotaItem() -> AgentQuotaItem? {
+    static func readQuotaItem(snapshot: ToolStatusSnapshot? = nil) -> AgentQuotaItem? {
         var sub: [String] = []
-        if let snap = read(toolID: "codex"), let title = snap.taskTitle {
+        let snap = snapshot ?? read(toolID: "codex")
+        if let snap, let title = snap.taskTitle {
             sub.append("最近: \(title)")
         } else {
             sub.append("就绪在线")

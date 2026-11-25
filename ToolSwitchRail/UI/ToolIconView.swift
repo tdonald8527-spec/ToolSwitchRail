@@ -11,6 +11,7 @@ struct ToolIconView: View {
     var isOpen: Bool = true
     var status: AgentTaskStatus = .unknown
     var usageText: String? = nil
+    var hasUnread: Bool = false
     var namespace: Namespace.ID? = nil
     var onRemove: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
@@ -82,52 +83,31 @@ struct ToolIconView: View {
                 Spacer()
                 icon
                     .frame(width: 26, height: 26)
-                    .scaleEffect(isLaunching ? 1.06 : 1.0)
+                    // Launching: a slow breath (static dim under Reduce motion); settles back
+                    // with the standard motion once the window is there.
+                    .scaleEffect(isLaunching && Motion.launching != nil ? 1.05 : 1.0)
                     .opacity(isLaunching ? 0.6 : 1.0)
-                    .animation(
-                        isLaunching
-                            ? .easeInOut(duration: 0.75).repeatForever(autoreverses: true)
-                            : .spring(response: 0.24, dampingFraction: 0.8),
-                        value: isLaunching
-                    )
+                    .animation(isLaunching ? (Motion.launching ?? Motion.fade) : Motion.standard, value: isLaunching)
                 Spacer()
             }
 
-            if isOpen {
-                StatusDotView(status: status)
-                    .offset(x: 30, y: 14)
-            }
         }
         .frame(width: 44, height: 44)
+        // Not running = dimmed. Fades rather than jumps when an app opens or quits.
         .opacity(isOpen || isSelected || isLaunching ? 1.0 : 0.34)
+        .animation(Motion.fade, value: isOpen)
         .scaleEffect(isPressed ? 0.94 : 1.0)
-        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isPressed)
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .animation(Motion.quick, value: isPressed)
+        .animation(Motion.fade, value: isHovered)
         .contentShape(Rectangle())
         .help(tooltipText)
-        .contextMenu {
-            Button {
-                onActivate?()
-            } label: {
-                Label("切换至 \(tool.name)", systemImage: "arrow.up.forward.app")
-            }
-            Divider()
-            Button(role: .destructive) {
-                onRemove?()
-            } label: {
-                Label("从 Rail 移除", systemImage: "trash")
-            }
-        }
+        .accessibilityLabel(tooltipText)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
+    /// Same format everywhere: 「名称 · 状态」.
     private var tooltipText: String {
-        var parts = [tool.name]
-        parts.append(isOpen ? "运行中" : "已关闭")
-        parts.append(status.shortLabel)
-        if let usageText, !usageText.isEmpty {
-            parts.append(usageText)
-        }
-        return parts.joined(separator: " · ")
+        "\(tool.name) · \(ToolStateLabel.text(isLaunching: isLaunching, isSelected: isSelected, isOpen: isOpen))"
     }
 
     @ViewBuilder
@@ -145,29 +125,6 @@ struct ToolIconView: View {
                 .font(.system(size: 16, weight: .medium, design: .rounded))
                 .foregroundColor(isLightMode ? Color(white: 0.15).opacity(isSelected ? 0.95 : 0.72) : Color(white: 0.95).opacity(isSelected ? 0.95 : 0.72))
         }
-    }
-}
-
-struct StatusDotView: View {
-    let status: AgentTaskStatus
-
-    var body: some View {
-        Circle()
-            .fill(status.dotColor)
-            .frame(width: 8, height: 8)
-            .overlay(
-                Circle()
-                    .stroke(Color.black.opacity(0.25), lineWidth: 0.6)
-            )
-            .opacity(status == .working ? 1.0 : 0.95)
-            .scaleEffect(status == .working ? 1.08 : 1.0)
-            .animation(
-                status == .working
-                    ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-                    : .default,
-                value: status
-            )
-            .accessibilityLabel(status.shortLabel)
     }
 }
 

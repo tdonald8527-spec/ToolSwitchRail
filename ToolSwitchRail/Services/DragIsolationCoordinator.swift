@@ -20,6 +20,7 @@ final class DragIsolationCoordinator {
 
     private var eventMonitors: [Any] = []
     private var dragStartFrame: CGRect?
+    private var dragStartWindowID: CGWindowID?
     private var activePIDAtMouseDown: pid_t?
     private var isolationActive = false
     private var hiddenApps: [HiddenAppState] = []
@@ -33,19 +34,20 @@ final class DragIsolationCoordinator {
 
     private func installEventMonitors() {
         let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handle(event)
+        let handleEvent: (NSEvent) -> Void = { [weak self] event in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.handle(event) }
+            } else {
+                DispatchQueue.main.async { self?.handle(event) }
             }
-        }) {
+        }
+
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: handleEvent) {
             eventMonitors.append(global)
         }
 
-        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handle(event)
-            }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { event in
+            handleEvent(event)
             return event
         }) {
             eventMonitors.append(local)
@@ -55,29 +57,42 @@ final class DragIsolationCoordinator {
     private func handle(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
+            if isolationActive {
+                // Recover our own hidden apps if a previous gesture lost mouse-up.
+                finishIsolation(finalFrame: dragStartFrame ?? .zero, allowFrameUpdates: false)
+            }
             restoreGeneration &+= 1
-            dragStartFrame = windowManager.activeContentFrame
+            let geometry = windowManager.currentTargetGeometry()
+            dragStartFrame = geometry?.frame
+            dragStartWindowID = geometry?.windowID
             activePIDAtMouseDown = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         case .leftMouseDragged:
             guard !windowManager.isMinimized,
                   let start = dragStartFrame,
                   let activePID = activePIDAtMouseDown,
-                  activePIDBelongsToSelectedWorkspace(activePID) else {
+                  activePIDBelongsToSelectedWorkspace(activePID),
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == activePID,
+                  let geometry = windowManager.currentTargetGeometry(),
+                  geometry.windowID == dragStartWindowID,
+                  !framesClose(geometry.frame, start, tolerance: 0.5) else {
                 return
             }
 
-            // Isolate from the first real drag event instead of waiting until the
-            // canonical frame has already moved by 1pt. The previous one-frame delay
-            // was enough to expose a sliver of the warm stack at the old position.
+            // Text selection and content drags leave the actual window unchanged.
+            // Start isolation only after observing movement/resize of the same window.
             if !isolationActive {
                 beginIsolation(stackFrame: start, activePID: activePID)
             }
 
         case .leftMouseUp:
-            let finalFrame = windowManager.activeContentFrame ?? dragStartFrame
-            if isolationActive, let finalFrame {
-                finishIsolation(finalFrame: finalFrame)
+            if isolationActive {
+                let geometry = windowManager.currentTargetGeometry()
+                let sameTarget = geometry?.windowID == dragStartWindowID &&
+                    NSWorkspace.shared.frontmostApplication?.processIdentifier == activePIDAtMouseDown &&
+                    !windowManager.isMinimized
+                finishIsolation(finalFrame: geometry?.frame ?? dragStartFrame ?? .zero,
+                                allowFrameUpdates: sameTarget && geometry != nil)
             } else {
                 resetGestureState()
             }
@@ -105,6 +120,7 @@ final class DragIsolationCoordinator {
 
         let selfPID = ProcessInfo.processInfo.processIdentifier
         var seenPIDs = Set<pid_t>()
+        let currentFrame = windowManager.currentTargetGeometry()?.frame
 
         for tool in configStore.configuration.tools where tool.enabled && tool.kind == .app {
             for app in runningApplications(for: tool) {
@@ -118,7 +134,15 @@ final class DragIsolationCoordinator {
                 if appName.contains("rustdesk") || bundleID.contains("rustdesk") { continue }
                 if isConfiguredBrowser(app) { continue }
 
-                let windows = stackWindows(for: app, near: stackFrame)
+                var windows = stackWindows(for: app, near: stackFrame)
+                // WindowManager may already have moved visible siblings before this
+                // event handler runs. Either observed stack position is valid.
+                if let currentFrame, !framesClose(currentFrame, stackFrame, tolerance: 0.5) {
+                    for window in stackWindows(for: app, near: currentFrame)
+                    where !windows.contains(where: { CFEqual($0, window) }) {
+                        windows.append(window)
+                    }
+                }
                 guard !windows.isEmpty else { continue }
 
                 hiddenApps.append(HiddenAppState(app: app, windows: windows))
@@ -127,9 +151,11 @@ final class DragIsolationCoordinator {
         }
     }
 
-    private func finishIsolation(finalFrame: CGRect) {
+    private func finishIsolation(finalFrame: CGRect, allowFrameUpdates: Bool = true) {
         restoreGeneration &+= 1
         let generation = restoreGeneration
+        let targetWindowID = dragStartWindowID
+        let targetPID = activePIDAtMouseDown
         let states = hiddenApps
         hiddenApps.removeAll()
         isolationActive = false
@@ -138,14 +164,15 @@ final class DragIsolationCoordinator {
 
         // Place while hidden first. When the apps return they should already sit under
         // the foreground window at the new canonical slot.
-        for state in states {
+        for state in states where allowFrameUpdates {
             guard !state.app.isTerminated else { continue }
             for window in state.windows {
                 setFrame(window, nsFrame: final)
             }
         }
 
-        for state in states where !state.app.isTerminated {
+        // A workspace minimize during the gesture is a newer explicit intent.
+        for state in states where !windowManager.isMinimized && !state.app.isTerminated {
             state.app.unhide()
         }
 
@@ -153,10 +180,15 @@ final class DragIsolationCoordinator {
         // was not enough: some apps restore a cached frame later and expose a strip of
         // the old window above/beside the foreground member. Reassert at three settle
         // points without putting siblings back into the live drag hot path.
-        for delay: UInt64 in [60_000_000, 180_000_000, 420_000_000] {
+        for delay: UInt64 in (allowFrameUpdates ? [60_000_000, 180_000_000, 420_000_000] : []) {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: delay)
-                guard let self, generation == self.restoreGeneration else { return }
+                guard let self, generation == self.restoreGeneration,
+                      !self.windowManager.isMinimized,
+                      let currentGeometry = self.windowManager.currentTargetGeometry(),
+                      currentGeometry.windowID == targetWindowID,
+                      self.framesClose(currentGeometry.frame, final, tolerance: 0.5),
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else { return }
                 for state in states where !state.app.isTerminated && !state.app.isHidden {
                     for window in state.windows {
                         guard !self.boolAttribute(window, kAXMinimizedAttribute as CFString) else { continue }
@@ -177,6 +209,7 @@ final class DragIsolationCoordinator {
             restoreGeneration &+= 1
         }
         dragStartFrame = nil
+        dragStartWindowID = nil
         activePIDAtMouseDown = nil
         if !isolationActive {
             hiddenApps.removeAll()

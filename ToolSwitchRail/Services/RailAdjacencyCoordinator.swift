@@ -17,6 +17,8 @@ final class RailAdjacencyCoordinator {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var eventMonitors: [Any] = []
     private var enforcementGeneration: UInt = 0
+    private var mouseDownGeometry: (windowID: CGWindowID, frame: CGRect)?
+    private var mouseDownPID: pid_t?
 
     init(
         configStore: ConfigStore,
@@ -53,22 +55,44 @@ final class RailAdjacencyCoordinator {
         }
         workspaceObservers.append(activation)
 
-        let mask: NSEvent.EventTypeMask = [.leftMouseUp]
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.scheduleEnforcement()
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp]
+        let handleEvent: (NSEvent) -> Void = { [weak self] event in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.handleMouseEvent(event) }
+            } else {
+                DispatchQueue.main.async { self?.handleMouseEvent(event) }
             }
-        }) {
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: handleEvent) {
             eventMonitors.append(global)
         }
 
-        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.scheduleEnforcement()
-            }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { event in
+            handleEvent(event)
             return event
         }) {
             eventMonitors.append(local)
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            enforcementGeneration &+= 1 // A new interaction supersedes old settle checks.
+            mouseDownGeometry = windowManager.currentTargetGeometry()
+            mouseDownPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        case .leftMouseUp:
+            defer { mouseDownGeometry = nil; mouseDownPID = nil }
+            guard !windowManager.isMinimized,
+                  let startPID = mouseDownPID,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == startPID,
+                  let start = mouseDownGeometry,
+                  let current = windowManager.currentTargetGeometry(),
+                  start.windowID == current.windowID,
+                  !framesClose(start.frame, current.frame, tolerance: 0.5) else { return }
+            scheduleEnforcement()
+        default:
+            break
         }
     }
 

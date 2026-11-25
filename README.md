@@ -31,29 +31,37 @@ Tool Switch Rail provides a thin desktop switching and coordination layer instea
 
 ### Native workspace rail
 
-- Approx. 56 pt floating side rail.
-- Registered app windows snap to the same content frame.
-- Moving/resizing the active window keeps the rail aligned.
-- Optional minimization of other registered windows when switching.
-- Per-tool light/dark background matching.
+- Approx. 56 pt floating side rail that stays visible while you use other apps.
+- Switching shows exactly one tool: the selected app is placed in the workspace and the other registered apps are hidden (`workspace.minimizeOtherRegisteredWindows`, on by default).
+- The rail is positioned from the window's **actual** frame after placement, so it never covers an app that refused a size or position.
+- Moving/resizing the active window keeps the rail aligned; only your own drags/resizes change where the next tool is placed.
+- One clearly labelled **Collapse workspace** button (`Cmd + Option + M`); full-screen / restore and window sizes live in the settings menu.
+- Per-tool light/dark background matching; the rail follows the macOS appearance automatically.
 
 ### App management
 
 - Add any macOS `.app` through the native file picker.
-- Remove apps from the rail, dashboard, or settings menu.
+- Remove an app from its right-click menu or the settings menu. Removal is immediate and can be undone from the "Removed · Undo" toast for 5 seconds — no confirmation dialogs.
 - Drag to reorder apps and persist the order.
+- One settings menu, identical from the rail gear, the dashboard gear and a right-click on the menu-bar icon.
 - Keyboard switching with `Cmd + Option + 1...9`.
 - Show/minimize Tool Switch Rail with `Cmd + Option + M`.
 
 ### Status dashboard
 
-The menu-bar popover provides a compact dashboard and local status hints for selected desktop agents. Where a reliable local runtime signal is available, Tool Switch Rail can expose best-effort indicators such as running, idle, working, or needs-attention states.
+The menu-bar popover shows every registered app with one of four states — **Not started / Launching / Current / Running** — the same words used in the rail tooltips. Click a card to switch, right-click to remove. Missing Accessibility permission is shown as a hint with a direct link to System Settings, only when it is actually missing.
 
 Status detection is deliberately conservative: it is best-effort telemetry, not an official API or guarantee of third-party application state. Probe behavior can change when third-party applications change their local persistence formats.
 
-### Appearance control
+### Feedback and motion
 
-Tool Switch Rail can switch macOS appearance and update the rail presentation immediately. This functionality uses macOS system interfaces and may require maintenance as macOS evolves.
+- Errors (window not found, app could not be opened, permission missing) appear as a small non-blocking toast next to the rail with a **Retry** / **Open Settings** action, then fade away. Nothing blocks what you are doing.
+- One motion vocabulary for the whole app (`UI/Experience.swift` → `Motion`): `quick` for press/hover, `standard` for selection, reordering, insert/remove and toasts, `fade` for colour and opacity. Dragging and resizing follow the pointer directly.
+- Respects **Reduce motion**: movement becomes short cross-fades and nothing loops.
+
+### Design principles
+
+Complexity belongs to the system, not the user: decide what the system can decide, hide what is not useful right now, do what can be done for the user, keep the same thing the same everywhere, give every press a response that can be taken back, never interrupt, make frequent actions easy and destructive ones hard to hit by accident, and let the interface explain itself.
 
 ## Requirements
 
@@ -83,11 +91,19 @@ On first launch, macOS may require Accessibility permission so the app can coord
 
 `System Settings → Privacy & Security → Accessibility → Tool Switch Rail`
 
-For incremental build + launch:
+To build, install into `/Applications` and relaunch in one step (log in `build-and-install.log`):
+
+```bash
+./build-and-install.command
+```
+
+For incremental build + launch from `Dist/`:
 
 ```bash
 ./run.command
 ```
+
+> Building with only the Command Line Tools: the SwiftUI macro plugin is not included, so `@State` fails to compile ("StateMacro could not be found"). Use `@StateObject` with a small `ObservableObject` instead.
 
 ## Configuration
 

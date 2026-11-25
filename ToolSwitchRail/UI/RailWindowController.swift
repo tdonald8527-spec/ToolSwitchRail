@@ -14,6 +14,7 @@ final class RailWindowController: NSWindowController {
     private var priorFrontmostApp: NSRunningApplication?
     private var visibilityAnimationGeneration: UInt = 0
     private var hostingView: NSHostingView<RailView>?
+    private let toastPanel = ToastPanelController()
 
     static let seamExtension: CGFloat = 1
 
@@ -100,6 +101,7 @@ final class RailWindowController: NSWindowController {
         let totalWidth = width + Self.seamExtension
         let adjustedFrame = CGRect(x: frame.minX, y: frame.minY, width: totalWidth, height: frame.height)
         let currentFrame = window.frame
+        toastPanel.updateAnchor(railFrame: adjustedFrame)
         if currentFrame.equalTo(adjustedFrame) { return }
 
         if currentFrame.size.equalTo(adjustedFrame.size) {
@@ -112,24 +114,23 @@ final class RailWindowController: NSWindowController {
     }
 
     func setFloatingForManagedTool(_ isManaged: Bool) {
-        guard let window else { return }
+        guard let window, !windowManager.isMinimized else { return }
+        // Cancels a pending fade-out; if one was underway, glide back instead of snapping.
         visibilityAnimationGeneration &+= 1
-        window.alphaValue = 1
-
-        if isManaged {
-            if window.level != .floating {
-                window.level = .floating
-                if let panel = window as? NSPanel {
-                    panel.isFloatingPanel = true
-                }
+        if window.alphaValue < 0.99 {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Motion.windowFadeDuration
+                window.animator().alphaValue = 1
             }
-            window.orderFrontRegardless()
-        } else {
-            // Switching to an unmanaged app must remain immediate. In particular,
-            // Parallels/Finder/Safari should never wait for a fade before receiving
-            // the full foreground visual state.
-            window.orderOut(nil)
         }
+
+        if window.level != .floating {
+            window.level = .floating
+            if let panel = window as? NSPanel {
+                panel.isFloatingPanel = true
+            }
+        }
+        window.orderFrontRegardless()
     }
 
     func orderAdjacentToTargetWindow(targetWindowID: CGWindowID? = nil) {
@@ -147,63 +148,40 @@ final class RailWindowController: NSWindowController {
         window?.setFrameOrigin(origin)
     }
 
+    /// Short fade out, then order out. The generation counter keeps it atomic: any newer
+    /// show / switch cancels a fade that is still running, so a stale fade can never hide
+    /// the rail after it was asked to come back.
     func hide() {
         guard let window else { return }
         visibilityAnimationGeneration &+= 1
         let generation = visibilityAnimationGeneration
-
-        guard window.isVisible else {
-            window.alphaValue = 1
-            return
-        }
-
+        ToastCenter.shared.dismiss()
+        guard window.isVisible else { window.alphaValue = 1; return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.10
-            context.allowsImplicitAnimation = true
+            context.duration = Motion.windowFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 0
         } completionHandler: { [weak self, weak window] in
             Task { @MainActor in
-                guard let self, let window,
-                      generation == self.visibilityAnimationGeneration else { return }
+                guard let self, let window, generation == self.visibilityAnimationGeneration else { return }
                 window.orderOut(nil)
                 window.alphaValue = 1
             }
         }
     }
 
+    /// Fade in from wherever the rail currently is (also from a half-finished fade out).
     func show(relativeTo targetWindowID: CGWindowID? = nil) {
         guard let window else { return }
         visibilityAnimationGeneration &+= 1
-        let generation = visibilityAnimationGeneration
-
-        let wasVisible = window.isVisible
-        if !wasVisible {
-            window.alphaValue = 0
-        }
-
-        if window.level == .floating {
-            window.orderFrontRegardless()
-        } else if let wid = targetWindowID, wid > 0 {
-            window.order(.above, relativeTo: Int(wid))
-        } else if !window.isVisible {
-            window.orderFrontRegardless()
-        }
-
-        guard !wasVisible || window.alphaValue < 0.999 else {
-            window.alphaValue = 1
-            return
-        }
-
+        let wasVisible = window.isVisible && window.alphaValue > 0.99
+        if !window.isVisible { window.alphaValue = 0 }
+        orderAdjacentToTargetWindow(targetWindowID: targetWindowID)
+        guard !wasVisible else { window.alphaValue = 1; return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.allowsImplicitAnimation = true
+            context.duration = Motion.windowFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
-        } completionHandler: { [weak self, weak window] in
-            Task { @MainActor in
-                guard let self, let window,
-                      generation == self.visibilityAnimationGeneration else { return }
-                window.alphaValue = 1
-            }
         }
     }
 
